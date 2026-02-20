@@ -1,0 +1,4880 @@
+# Compiler Reference
+
+Source: https://neuroscript-lang.com/docs/compiler
+
+# Compiler Reference
+
+The NeuroScript CLI provides four commands for working with `.ns` source files: **parse**, **validate**, **compile**, and **list**.
+
+## `neuroscript parse`
+
+Parse a NeuroScript file and display its internal IR structure. Useful for understanding how the compiler sees your code.
+
+```bash
+neuroscript parse <FILE> [OPTIONS]
+```
+
+### Arguments [parse]
+
+| Argument | Description |
+| -------- | ----------- |
+| `<FILE>` | Path to a `.ns` source file |
+
+### Options [parse]
+
+| Option | Description |
+| ------ | ----------- |
+| `-v, --verbose` | Show detailed IR structure output |
+
+### Example [parse]
+
+```bash
+# Quick check that a file parses
+neuroscript parse my_model.ns
+
+# See the full IR
+neuroscript parse my_model.ns --verbose
+```
+
+---
+
+## `neuroscript validate`
+
+Parse a file and run all validation checks: neuron existence, connection arity, cycle detection, and shape compatibility.
+
+```bash
+neuroscript validate <FILE> [OPTIONS]
+```
+
+### Arguments [validate]
+
+| Argument | Description |
+| -------- | ----------- |
+| `<FILE>` | Path to a `.ns` source file |
+
+### Options [validate]
+
+| Option | Description |
+| ------ | ----------- |
+| `-v, --verbose` | Show detailed validation output |
+| `--no-stdlib` | Skip loading the standard library |
+| `--no-deps` | Skip loading fetched dependencies |
+
+### Example [validate]
+
+```bash
+neuroscript validate my_model.ns --verbose
+```
+
+---
+
+## `neuroscript compile`
+
+Full compilation pipeline: parse, validate, optimize, and generate a PyTorch `nn.Module`.
+
+```bash
+neuroscript compile <FILE> [OPTIONS]
+```
+
+### Arguments [compile]
+
+| Argument | Description |
+| -------- | ----------- |
+| `<FILE>` | Path to a `.ns` source file |
+
+### Options [compile]
+
+| Option | Description |
+| ------ | ----------- |
+| `-n, --neuron <NAME>` | Neuron to compile (defaults to PascalCase of filename) |
+| `-o, --output <FILE>` | Write output to a file instead of stdout |
+| `-v, --verbose` | Show optimization stats and detailed output |
+| `--bundle` | Inline primitive class definitions for a self-contained output |
+| `--no-optimize` | Disable all optimizations |
+| `--no-dead-elim` | Disable dead branch elimination only |
+| `--no-stdlib` | Skip loading the standard library |
+| `--no-deps` | Skip loading fetched dependencies |
+
+### Examples [compile]
+
+```bash
+# Compile to stdout (auto-detects neuron from filename)
+neuroscript compile my_model.ns
+
+# Compile a specific neuron to a file
+neuroscript compile my_model.ns --neuron Encoder -o encoder.py
+
+# See optimization details
+neuroscript compile my_model.ns --verbose
+```
+
+---
+
+## `neuroscript list`
+
+List all neurons defined in a file, the standard library, or fetched packages.
+
+```bash
+neuroscript list [FILE] [OPTIONS]
+```
+
+### Arguments [list]
+
+| Argument | Description |
+| -------- | ----------- |
+| `[FILE]` | NeuroScript file (optional when using `--stdlib` or `--available`) |
+
+### Options [list]
+
+| Option | Description |
+| ------ | ----------- |
+| `-v, --verbose` | Show connection details |
+| `--stdlib` | List all primitives and stdlib composites |
+| `--package <NAME>` | List neurons from a specific fetched dependency |
+| `--available` | List everything: stdlib + all dependencies |
+
+### Examples [list]
+
+```bash
+neuroscript list my_model.ns
+neuroscript list --stdlib --verbose
+neuroscript list --available
+```
+
+---
+
+## Bundle Mode
+
+By default, compiled output imports primitives from the `neuroscript_runtime` Python package:
+
+```python
+from neuroscript_runtime.primitives.linear import Linear
+from neuroscript_runtime.primitives.activations import GELU
+```
+
+This requires `pip install neuroscript-runtime` in the target environment.
+
+The **`--bundle`** flag eliminates that dependency by inlining the required primitive class definitions directly into the generated file. The output is a single, self-contained Python module that only needs `torch`:
+
+```bash
+neuroscript compile my_model.ns --bundle -o model.py
+```
+
+The bundled file includes:
+
+- A unified import block (`torch`, `torch.nn`, `torch.nn.functional`, `math`, `typing`)
+- Only the primitive classes actually used by your neuron (not the entire library)
+- Your compiled neuron class(es) at the bottom
+
+### When to use `--bundle`
+
+| Scenario | Recommended |
+| -------- | ----------- |
+| Development with the NeuroScript toolchain installed | Default (no flag) |
+| Sharing a generated file with collaborators | `--bundle` |
+| Deploying to an environment without `neuroscript_runtime` | `--bundle` |
+| Embedding generated code in another project | `--bundle` |
+| Minimizing output size | Default (imports are smaller) |
+
+### Example
+
+```bash
+# Generate a self-contained model file
+neuroscript compile transformer.ns --bundle -o transformer.py
+
+# Verify it works without neuroscript_runtime installed
+python -c "
+import importlib.util, torch
+spec = importlib.util.spec_from_file_location('model', 'transformer.py')
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+print('Classes:', [c for c in dir(mod) if not c.startswith('_')])
+"
+```
+
+---
+
+# Introduction to NeuroScript
+
+Source: https://neuroscript-lang.com/docs/intro
+
+# Introduction to NeuroScript
+
+NeuroScript is a neural architecture composition language that treats neurons as first-class composable units. It compiles to PyTorch (with future support for ONNX and JAX), enabling declarative definition of neural networks with strong shape guarantees.
+
+## Core Philosophy
+
+**Neurons all the way down** - Everything in NeuroScript is a neuron, and neurons compose into neurons. This uniform abstraction makes it easy to build complex architectures from simple, reusable components.
+
+## Quick Example
+
+```neuroscript
+neuron FFN(dim, expansion):
+    in: [*batch, seq, dim]
+    out: [*batch, seq, dim]
+    graph:
+        in ->
+            Linear(dim, dim * expansion)
+            GELU()
+            Linear(dim * expansion, dim)
+            out
+```
+
+## Key Features
+
+- **Shape-aware**: Tensor shapes are first-class citizens with compile-time validation
+- **Composable**: Build complex networks from simple, reusable neurons
+- **Type-safe**: Shape inference catches dimensional errors before runtime
+- **Declarative**: Focus on *what* you want, not *how* to implement it
+
+## Advanced Capabilities
+
+### Compatibility & Shape Inference
+
+NeuroScript ensures pipeline compatibility through its rigorous shape algebra system. Every connection is validated at compile time:
+
+```neuroscript
+# This will fail to compile if dimensions don't match
+neuron Incompatible:
+    in: [batch, 128]
+    graph:
+        in -> Linear(128, 64) -> Linear(32, 10) -> out
+        # Error: Shape mismatch! Expected [*, 32], got [*, 64]
+```
+
+### Lazy Loading
+
+Use the `@lazy` annotation to define components that are only instantiated when used. This is powerful for conditional architectures or dynamic routing:
+
+```neuroscript
+neuron DynamicBranch(dim):
+    context:
+        @lazy heavy_branch = StackedTransformer(dim, 12)
+        light_branch = Linear(dim, dim)
+    
+    graph:
+        in -> match: ->
+            [*, 1, dim]: heavy_branch -> out
+            [*, _, dim]: light_branch -> out
+```
+
+### Conditionals and Recursion
+
+NeuroScript supports `if`/`elif`/`else` for parameter-based branching and recursive neuron definitions:
+
+```neuroscript
+neuron RecursiveStack(dim, depth):
+    in: [*, dim]
+    out: [*, dim]
+    context:
+        @lazy recurse = RecursiveStack(dim, depth - 1)
+    graph:
+        in ->
+            if depth > 0:
+                Linear(dim, dim)   # process input
+                GELU()             # activate
+                recurse            # recurse with depth - 1
+            else: Identity()
+            out
+```
+
+## Getting Started
+
+1. **[Primitives](/docs/primitives)** - Low-level building blocks wrapping PyTorch operations
+2. **[Standard Library](/docs/stdlib)** - High-level composable architectures
+3. **[Packages](/docs/packages)** - Create, share, and consume reusable neuron packages
+
+## Installation
+
+```bash
+# Install the NeuroScript compiler
+cargo install neuroscript
+
+# Install the Python runtime
+pip install neuroscript-runtime
+```
+
+## Example Usage
+
+```bash
+# Compile a NeuroScript file to PyTorch
+neuroscript compile my_model.ns -o model.py
+
+# Generate a self-contained file (no neuroscript_runtime dependency)
+neuroscript compile my_model.ns --bundle -o model.py
+
+# Validate shapes without generating code
+neuroscript validate my_model.ns
+```
+
+## Learn More
+
+- [Language Specification](https://github.com/neuroscript/neuroscript/blob/main/docs/language-spec.md)
+- [Examples](https://github.com/neuroscript/neuroscript/tree/main/examples)
+- [GitHub Repository](https://github.com/neuroscript/neuroscript)
+
+---
+
+# CLI Reference
+
+Source: https://neuroscript-lang.com/docs/packages/cli-reference
+
+All package management commands are subcommands of the `neuroscript` CLI.
+
+## `neuroscript init`
+
+Initialize a new NeuroScript package.
+
+```bash
+neuroscript init <NAME> [OPTIONS]
+```
+
+### Arguments [init]
+
+| Argument | Description |
+| ---------- | ------------- |
+| `<NAME>` | Package name (lowercase, alphanumeric + hyphens) |
+
+### Options [init]
+
+| Option | Description |
+| -------- | ------------- |
+| `--author <AUTHOR>` | Author in `"Name <email>"` format |
+| `--license <LICENSE>` | License identifier (e.g., `MIT`, `Apache-2.0`) |
+| `--version <VERSION>` | Initial version (default: `0.1.0`) |
+| `--bin` | Include an `examples/` directory |
+| `--path <DIR>` | Create in a specific directory |
+
+### Example [init]
+
+```bash
+neuroscript init my-neurons \
+  --author "Your Name <you@example.com>" \
+  --license MIT \
+  --bin
+```
+
+---
+
+## `neuroscript add`
+
+Add a dependency to the current package.
+
+```bash
+neuroscript add <NAME> [OPTIONS]
+```
+
+### Arguments [add]
+
+| Argument | Description |
+| ---------- | ------------- |
+| `<NAME>` | Dependency name |
+
+### Options [add]
+
+| Option | Description |
+| -------- | ------------- |
+| `--version <VERSION>` | Version constraint (e.g., `"^1.0"`, `"0.3"`) |
+| `--git <URL>` | Git repository URL |
+| `--branch <BRANCH>` | Git branch to track |
+| `--tag <TAG>` | Git tag to pin |
+| `--rev <REV>` | Git commit hash to pin |
+| `--path <PATH>` | Local filesystem path |
+
+### Examples [add]
+
+```bash
+# Git dependency with branch
+neuroscript add blocks --git "https://github.com/user/blocks.git" --branch main
+
+# Local path dependency
+neuroscript add utils --path ../utils
+
+# Version constraint (future registry)
+neuroscript add core --version "^1.0"
+```
+
+---
+
+## `neuroscript fetch`
+
+Fetch all declared dependencies and generate a lockfile.
+
+```bash
+neuroscript fetch [OPTIONS]
+```
+
+### Options [fetch]
+
+| Option | Description |
+| -------- | ------------- |
+| `--verbose` | Show detailed fetch progress |
+| `--update` | Update dependencies to latest compatible versions |
+
+### Example [fetch]
+
+```bash
+neuroscript fetch --verbose
+```
+
+---
+
+## `neuroscript keygen`
+
+Generate an Ed25519 signing keypair.
+
+```bash
+neuroscript keygen <NAME>
+```
+
+### Arguments [keygen]
+
+| Argument | Description |
+| ---------- | ------------- |
+| `<NAME>` | Key name (used as filename prefix) |
+
+Keys are stored in `~/.neuroscript/keys/`:
+
+- `<NAME>.key` - Private key (restricted permissions)
+- `<NAME>.pub` - Public key
+
+### Example [keygen]
+
+```bash
+neuroscript keygen my-package
+```
+
+---
+
+## `neuroscript publish`
+
+Compute checksums, sign the package, and update `Axon.toml` with security metadata.
+
+```bash
+neuroscript publish [OPTIONS]
+```
+
+### Options [publish]
+
+| Option | Description |
+| -------- | ------------- |
+| `--no-sign` | Compute checksums only, skip signing |
+| `--key <PATH>` | Path to Ed25519 private key |
+| `--verbose` | Show detailed output |
+
+### Example [publish]
+
+```bash
+neuroscript publish --verbose
+neuroscript publish --no-sign
+neuroscript publish --key ~/.neuroscript/keys/custom.key
+```
+
+---
+
+## `neuroscript verify`
+
+Verify package checksums and signature.
+
+```bash
+neuroscript verify [OPTIONS]
+```
+
+### Options [verify]
+
+| Option | Description |
+| -------- | ------------- |
+| `--verbose` | Show per-file verification details |
+
+### Example [verify]
+
+```bash
+neuroscript verify --verbose
+```
+
+---
+
+## `neuroscript list` (Package Flags)
+
+List available neurons from various sources.
+
+```bash
+neuroscript list [FILE] [OPTIONS]
+```
+
+### Arguments [list]
+
+| Argument | Description |
+| ---------- | ------------- |
+| `[FILE]` | NeuroScript file to list neurons from (optional with `--stdlib`/`--available`) |
+
+### Package-Related Options [list]
+
+| Option | Description |
+| -------- | ------------- |
+| `--stdlib` | List all primitives and stdlib composites |
+| `--package <NAME>` | List neurons from a specific fetched dependency |
+| `--available` | List everything: stdlib + all dependencies |
+| `--verbose` | Show connection details |
+
+### Examples [list]
+
+```bash
+# List primitives and standard library neurons
+neuroscript list --stdlib
+
+# List neurons from a specific dependency
+neuroscript list --package attention-blocks
+
+# List all available neurons (stdlib + all deps)
+neuroscript list --available
+
+# List neurons in a file
+neuroscript list src/model.ns --verbose
+```
+
+---
+
+## `neuroscript validate` / `neuroscript compile` (Dependency Flags)
+
+Both `validate` and `compile` automatically load dependencies from `Axon.lock` when present.
+
+### Dependency Options [validate]
+
+| Option | Description |
+| -------- | ------------- |
+| `--no-deps` | Skip dependency loading |
+
+### Examples [validate]
+
+```bash
+# Compile with dependencies loaded automatically
+neuroscript compile src/model.ns
+
+# Compile without loading dependencies
+neuroscript compile src/model.ns --no-deps
+
+# Validate with dependency neurons in scope
+neuroscript validate src/model.ns
+```
+
+For the full list of compiler options (including `--bundle`, `--no-optimize`, and others), see the [Compiler Reference](/docs/compiler).
+
+---
+
+# Creating Packages
+
+Source: https://neuroscript-lang.com/docs/packages/creating-packages
+
+# Creating Packages
+
+A NeuroScript package is a collection of neuron definitions bundled with an `Axon.toml` manifest. Packages can be shared as git repositories and consumed as dependencies by other projects.
+
+## Initializing a Package
+
+Use `neuroscript init` to scaffold a new package:
+
+```bash
+neuroscript init attention-mechanisms \
+  --author "Your Name <you@example.com>" \
+  --license MIT
+```
+
+This creates:
+
+```
+attention-mechanisms/
+├── Axon.toml          # Package manifest
+├── README.md          # Basic documentation
+├── .gitignore         # Common ignore patterns
+└── src/
+    └── attention_mechanisms.ns  # Starter neuron definition
+```
+
+Use `--bin` to include an `examples/` directory:
+
+```bash
+neuroscript init attention-mechanisms --bin
+```
+
+Use `--path` to create the package in a specific location:
+
+```bash
+neuroscript init my-neurons --path ./packages/my-neurons
+```
+
+## The Axon.toml Manifest
+
+The manifest is the central configuration file for your package.
+
+### Package Metadata
+
+```toml
+[package]
+name = "attention-mechanisms"
+version = "0.1.0"
+authors = ["Your Name <you@example.com>"]
+license = "MIT"
+description = "Self-attention neurons for transformer architectures"
+repository = "https://github.com/user/attention-mechanisms"
+```
+
+**Name rules**: lowercase, alphanumeric + hyphens only. No leading, trailing, or consecutive hyphens.
+
+```toml
+# Valid names
+name = "core-primitives"
+name = "attention123"
+name = "my-cool-neurons"
+
+# Invalid names
+name = "Invalid_Name"        # no underscores
+name = "-leading-hyphen"     # no leading hyphen
+name = "double--hyphen"      # no consecutive hyphens
+```
+
+**Version**: must be valid [semver](https://semver.org/) (e.g., `"0.1.0"`, `"1.2.3-alpha"`).
+
+### Exported Neurons
+
+The `neurons` list declares which neurons your package provides to consumers:
+
+```toml
+neurons = [
+    "MultiHeadAttention",
+    "ScaledDotProductAttention",
+    "CrossAttention"
+]
+```
+
+If `neurons` is empty or omitted, **all** neuron definitions in `src/*.ns` are exported.
+
+### Dependencies
+
+```toml
+[dependencies]
+core-blocks = { git = "https://github.com/org/core-blocks.git", branch = "main" }
+local-utils = { path = "../local-utils" }
+```
+
+See [Working with Dependencies](dependencies) for details.
+
+### Python Runtime
+
+Declare Python dependencies that your compiled neurons need at runtime:
+
+```toml
+[python-runtime]
+requires = ["torch>=2.0", "einops>=0.6"]
+```
+
+## Writing Neuron Definitions
+
+Place your `.ns` files in the `src/` directory. Each file can contain one or more neuron definitions.
+
+### Example: SwiGLU Feed-Forward Network
+
+**`src/swiglu_ffn.ns`**:
+
+```neuroscript
+neuron SwiGLU_FFN(dim, expansion):
+    in: [*batch, seq, dim]
+    out: [*batch, seq, dim]
+    graph:
+        in -> Fork() -> (gate_path, value_path)
+        gate_path ->
+            Linear(dim, dim * expansion)
+            SiLU()
+            gate
+        value_path ->
+            Linear(dim, dim * expansion)
+            value
+        (gate, value) -> Multiply() ->
+            Linear(dim * expansion, dim) ->
+            out
+```
+
+### Example: Mamba-Style Block
+
+**`src/mamba_block.ns`**:
+
+```neuroscript
+neuron MambaBlock(d_model, d_inner):
+    in: [*batch, seq, d_model]
+    out: [*batch, seq, d_model]
+    graph:
+        in -> Fork() -> (main, skip)
+        main ->
+            Linear(d_model, d_inner)
+            SiLU()
+            Linear(d_inner, d_inner)
+            SiLU()
+            Linear(d_inner, d_model)
+            processed
+        (processed, skip) -> Add() -> out
+```
+
+### Validating Your Package
+
+Always validate your neurons before publishing:
+
+```bash
+# Validate a single file
+neuroscript validate src/swiglu_ffn.ns
+
+# Compile to PyTorch to verify codegen
+neuroscript compile src/swiglu_ffn.ns
+
+# List all neurons in a file
+neuroscript list src/swiglu_ffn.ns
+```
+
+## Complete Example: Building a Package
+
+Here is a full walkthrough of creating a package with two neurons:
+
+```bash
+# 1. Initialize the package
+neuroscript init transformer-blocks \
+  --author "Your Name <you@example.com>" \
+  --license MIT
+
+cd transformer-blocks
+```
+
+**2. Edit `Axon.toml`** to declare your exports:
+
+```toml
+[package]
+name = "transformer-blocks"
+version = "0.1.0"
+authors = ["Your Name <you@example.com>"]
+license = "MIT"
+description = "Reusable transformer building blocks"
+
+neurons = ["PreNormBlock", "SwiGLU_FFN"]
+
+[dependencies]
+
+[python-runtime]
+requires = ["torch>=2.0"]
+```
+
+**3. Create `src/blocks.ns`** with your neuron definitions:
+
+```neuroscript
+neuron SwiGLU_FFN(dim, expansion):
+    in: [*batch, seq, dim]
+    out: [*batch, seq, dim]
+    graph:
+        in -> Fork() -> (gate_path, value_path)
+        gate_path ->
+            Linear(dim, dim * expansion)
+            SiLU()
+            gate
+        value_path ->
+            Linear(dim, dim * expansion)
+            value
+        (gate, value) -> Multiply() ->
+            Linear(dim * expansion, dim) ->
+            out
+
+neuron PreNormBlock(dim, heads, expansion):
+    in: [*batch, seq, dim]
+    out: [*batch, seq, dim]
+    graph:
+        in -> Fork() -> (main, skip)
+        main ->
+            LayerNorm(dim)
+            MultiHeadSelfAttention(dim, heads)
+            processed
+        (processed, skip) -> Add() -> out
+```
+
+**4. Validate and test:**
+
+```bash
+neuroscript validate src/blocks.ns
+neuroscript compile src/blocks.ns --neuron SwiGLU_FFN
+neuroscript compile src/blocks.ns --neuron PreNormBlock
+```
+
+**5. Push to git** to make it available as a dependency:
+
+```bash
+git init && git add -A && git commit -m "Initial package"
+git remote add origin https://github.com/you/transformer-blocks.git
+git push -u origin main
+```
+
+Other projects can now depend on this package using the git URL. See [Working with Dependencies](dependencies) for how consumers import your neurons.
+
+---
+
+# Working with Dependencies
+
+Source: https://neuroscript-lang.com/docs/packages/dependencies
+
+# Working with Dependencies
+
+NeuroScript packages can depend on other packages distributed as git repositories or local directories. The dependency system handles fetching, caching, version locking, and integration with the compiler.
+
+## Adding Dependencies
+
+Use `neuroscript add` to declare a dependency in your `Axon.toml`:
+
+### Git Dependencies
+
+```bash
+# Add from a git repository
+neuroscript add attention-blocks \
+  --git "https://github.com/user/attention.git"
+
+# Pin to a specific branch
+neuroscript add attention-blocks \
+  --git "https://github.com/user/attention.git" \
+  --branch main
+
+# Pin to a tag
+neuroscript add attention-blocks \
+  --git "https://github.com/user/attention.git" \
+  --tag v0.2.0
+
+# Pin to a specific commit
+neuroscript add attention-blocks \
+  --git "https://github.com/user/attention.git" \
+  --rev abc123
+```
+
+### Path Dependencies
+
+For local development, reference packages by filesystem path:
+
+```bash
+neuroscript add local-utils --path ../local-utils
+```
+
+Path dependencies are resolved relative to your project root. They are useful when developing multiple packages together.
+
+### Version Dependencies
+
+For future registry support:
+
+```bash
+neuroscript add core-primitives --version "^1.0"
+```
+
+### Resulting Axon.toml
+
+After adding dependencies, your manifest will look like:
+
+```toml
+[dependencies]
+attention-blocks = { git = "https://github.com/user/attention.git", branch = "main" }
+local-utils = { path = "../local-utils" }
+core-primitives = "^1.0"
+```
+
+## Fetching Dependencies
+
+Run `neuroscript fetch` to download all declared dependencies:
+
+```bash
+neuroscript fetch
+```
+
+```
+Fetching 2 dependencies...
+  ✓ attention-blocks -> /Users/you/.neuroscript/git/a1b2c3
+  ✓ local-utils -> /Users/you/projects/local-utils
+
+✓ Generated Axon.lock
+✓ All dependencies fetched successfully
+```
+
+Use `--verbose` for detailed output, or `--update` to pull the latest compatible versions:
+
+```bash
+neuroscript fetch --verbose
+neuroscript fetch --update
+```
+
+### Where Dependencies Go
+
+- **Git dependencies** are cloned to `~/.neuroscript/git/<hash>/`
+- **Path dependencies** are resolved in place (no copying)
+- A shared cache at `~/.neuroscript/` avoids redundant clones
+
+## The Lockfile (Axon.lock)
+
+After fetching, an `Axon.lock` file is generated that pins exact versions and commit hashes:
+
+```toml
+# This file is @generated by neuroscript
+# It is not intended for manual editing
+
+version = 1
+
+[[package]]
+name = "attention-blocks"
+version = "0.3.1"
+source = "git+https://github.com/user/attention.git?rev=abc123"
+
+[[package]]
+name = "local-utils"
+version = "0.1.0"
+source = "path+/Users/you/projects/local-utils"
+```
+
+**Commit your lockfile** to version control. This ensures everyone on your team builds with the exact same dependency versions.
+
+## Using Neurons from Dependencies
+
+Once dependencies are fetched, import their neurons using `use` statements in your `.ns` files:
+
+### Wildcard Import
+
+Import all exported neurons from a package:
+
+```neuroscript
+use attention-blocks,src/*
+
+neuron MyModel(dim, heads):
+    in: [*batch, seq, dim]
+    out: [*batch, seq, dim]
+    graph:
+        in -> MultiHeadAttention(dim, heads) -> out
+```
+
+### Specific Import
+
+Import a single neuron by name:
+
+```neuroscript
+use attention-blocks,src/CrossAttention
+
+neuron DecoderBlock(dim, heads):
+    in: [*batch, seq, dim]
+    out: [*batch, seq, dim]
+    graph:
+        in -> CrossAttention(dim, heads) -> out
+```
+
+### Multiple Imports
+
+```neuroscript
+use attention-blocks,src/*
+use local-utils,src/*
+
+neuron FullModel(dim, heads, expansion):
+    in: [*batch, seq, dim]
+    out: [*batch, seq, dim]
+    graph:
+        in ->
+            MultiHeadAttention(dim, heads)
+            SwiGLU_FFN(dim, expansion)
+            out
+```
+
+## Integration with Compile and Validate
+
+The compiler automatically loads dependencies when an `Axon.lock` file is present:
+
+```bash
+# Validates with all dependency neurons available
+neuroscript validate src/model.ns
+
+# Compiles with dependency neurons in scope
+neuroscript compile src/model.ns
+
+# Skip dependency loading (useful for standalone files)
+neuroscript validate src/model.ns --no-deps
+neuroscript compile src/model.ns --no-deps
+```
+
+The compiler walks up from your input file to find the nearest `Axon.lock`, then loads all declared dependencies into the symbol table before validation and compilation.
+
+### Merge Precedence
+
+When the same neuron name exists in multiple sources, precedence is:
+
+1. **User-defined neurons** (your `.ns` files) - highest priority
+2. **Standard library** neurons
+3. **Dependency** neurons - lowest priority
+
+This means you can override any dependency or stdlib neuron by defining one with the same name in your project.
+
+## Discovering Available Neurons
+
+Use the `list` command to explore what neurons are available:
+
+```bash
+# List all stdlib primitives and composites
+neuroscript list --stdlib
+
+# List neurons from a specific dependency
+neuroscript list --package attention-blocks
+
+# List everything: stdlib + all dependencies
+neuroscript list --available
+
+# List neurons defined in a file
+neuroscript list src/model.ns
+```
+
+## Full Workflow Example
+
+Here's a complete example of consuming a package:
+
+```bash
+# 1. Initialize your project
+neuroscript init my-model --author "You <you@example.com>"
+cd my-model
+
+# 2. Add a dependency
+neuroscript add transformer-blocks \
+  --git "https://github.com/user/transformer-blocks.git"
+
+# 3. Fetch it
+neuroscript fetch
+
+# 4. See what neurons are available
+neuroscript list --available
+```
+
+**5. Write your model** using imported neurons in `src/my_model.ns`:
+
+```neuroscript
+use transformer-blocks,src/*
+
+neuron MyLanguageModel(dim, heads, layers, vocab):
+    in: [*batch, seq]
+    out: [*batch, seq, vocab]
+    graph:
+        in ->
+            Embedding(vocab, dim)
+            PreNormBlock(dim, heads, 4)
+            PreNormBlock(dim, heads, 4)
+            PreNormBlock(dim, heads, 4)
+            LayerNorm(dim)
+            Linear(dim, vocab)
+            out
+```
+
+**6. Validate and compile:**
+
+```bash
+neuroscript validate src/my_model.ns
+neuroscript compile src/my_model.ns -o model.py
+```
+
+The compiled Python module will include all necessary imports for both your neurons and the dependency neurons used in the graph.
+
+---
+
+# Package Management
+
+Source: https://neuroscript-lang.com/docs/packages
+
+# Package Management
+
+NeuroScript uses a Cargo-inspired package management system built around **Axon.toml** manifests. Packages bundle reusable neuron definitions that can be shared via git repositories, imported into other projects, and cryptographically signed for integrity.
+
+## Quick Start
+
+```bash
+# Create a new neuron package
+neuroscript init my-neurons --author "You <you@example.com>"
+
+# Add a dependency from a git repo
+cd my-neurons
+neuroscript add attention-blocks \
+  --git "https://github.com/user/attention.git"
+
+# Fetch all dependencies
+neuroscript fetch
+
+# Use neurons from dependencies in your code
+neuroscript compile src/model.ns
+```
+
+## How It Works
+
+1. **Manifests** (`Axon.toml`) declare package metadata, exported neurons, and dependencies
+2. **Dependencies** can be git repositories or local paths
+3. **Lockfiles** (`Axon.lock`) pin exact versions for reproducible builds
+4. **Use statements** import neurons from fetched packages into your code
+5. **Security** features provide Ed25519 signing and SHA-256 checksums
+
+## Package Structure
+
+A typical NeuroScript package looks like this:
+
+```
+my-package/
+├── Axon.toml          # Package manifest
+├── Axon.lock          # Lockfile (generated by fetch)
+├── README.md          # Documentation
+├── .gitignore
+└── src/
+    ├── attention.ns   # Neuron definitions
+    └── ffn.ns
+```
+
+## Manifest Format
+
+```toml
+[package]
+name = "my-neurons"
+version = "0.1.0"
+authors = ["You <you@example.com>"]
+license = "MIT"
+description = "Reusable attention neurons"
+
+# Which neurons this package exports
+neurons = ["MultiHeadAttention", "CrossAttention"]
+
+[dependencies]
+core-blocks = { git = "https://github.com/org/core-blocks.git" }
+local-utils = { path = "../local-utils" }
+
+[python-runtime]
+requires = ["torch>=2.0"]
+```
+
+## Documentation
+
+- [Creating Packages](creating-packages) - Initialize and structure a neuron package
+- [Working with Dependencies](dependencies) - Add, fetch, and manage dependencies
+- [Publishing and Security](publishing) - Sign packages and verify integrity
+- [CLI Reference](cli-reference) - All package management commands
+
+---
+
+# Publishing and Security
+
+Source: https://neuroscript-lang.com/docs/packages/publishing
+
+# Publishing and Security
+
+NeuroScript packages include cryptographic security features to ensure integrity and authenticity. Packages are signed with Ed25519 keys and verified with SHA-256 checksums.
+
+## Security Overview
+
+Every published package gets:
+
+- **SHA-256 checksums** for each `.ns` source file and an overall package checksum
+- **Ed25519 signature** over the package checksum, proving publisher identity
+- **Automatic verification** when consumers fetch the package
+
+## Generating Keys
+
+Before publishing, generate an Ed25519 keypair:
+
+```bash
+neuroscript keygen my-package
+```
+
+```
+✓ Generated Ed25519 keypair 'my-package'
+  Private key: ~/.neuroscript/keys/my-package.key
+  Public key:  ~/.neuroscript/keys/my-package.pub
+```
+
+Keys are stored in `~/.neuroscript/keys/`. Private keys are created with restricted permissions (0600 on Unix).
+
+## Publishing a Package
+
+The `publish` command computes checksums, signs the package, and updates `Axon.toml` with security metadata:
+
+```bash
+neuroscript publish
+```
+
+```
+Publishing my-package v0.1.0
+  Computed checksums for 3 files
+  Overall checksum: sha256:93cd5af901067ee...
+  Signing with key: ~/.neuroscript/keys/my-package.key
+✓ Package prepared for distribution
+```
+
+### Options
+
+```bash
+# Checksums only (no signature)
+neuroscript publish --no-sign
+
+# Use a specific key file
+neuroscript publish --key /path/to/my.key
+
+# See detailed output
+neuroscript publish --verbose
+```
+
+### What Publish Does
+
+1. Scans all `.ns` files in `src/`
+2. Computes SHA-256 checksum for each file
+3. Computes an overall package checksum
+4. Signs the overall checksum with your Ed25519 private key
+5. Writes the security metadata into `Axon.toml`:
+
+```toml
+[security]
+publisher-key = "ED25519:29da85daa608..."
+signature = "ED25519:a1b2c3d4e5f6..."
+checksum = "sha256:93cd5af901067..."
+
+[security.checksums]
+"src/attention.ns" = "sha256:4128bddc..."
+"src/projection.ns" = "sha256:7f3a2b1c..."
+```
+
+After publishing, commit and push your updated `Axon.toml` to make the signed package available.
+
+## Verifying a Package
+
+Verify the integrity and authenticity of a package:
+
+```bash
+neuroscript verify
+```
+
+```
+✓ File checksums: all 3 files verified
+✓ Overall checksum: valid
+✓ Signature: valid
+
+✓ Package verification passed
+```
+
+Use `--verbose` for per-file details:
+
+```bash
+neuroscript verify --verbose
+```
+
+### What Verify Checks
+
+1. Each `.ns` file matches its recorded SHA-256 checksum
+2. The overall checksum matches the combined file checksums
+3. The Ed25519 signature is valid for the publisher key
+
+### Verification on Fetch
+
+When you `neuroscript fetch` a git dependency that includes security metadata in its `Axon.toml`, checksums are **automatically verified**. Checksum mismatches produce a hard error (fetch fails). Signature mismatches produce a warning but allow the fetch to proceed.
+
+## Security Formats
+
+| Field | Format | Description |
+|-------|--------|-------------|
+| Publisher key | `ED25519:<64-hex>` | 32-byte Ed25519 public key |
+| Signature | `ED25519:<128-hex>` | 64-byte Ed25519 signature |
+| Checksum | `sha256:<64-hex>` | 32-byte SHA-256 hash |
+| Key files | Raw hex | 32-byte seed (`.key`) or public key (`.pub`) |
+
+## Workflow: Publish and Consume
+
+### Publisher Side
+
+```bash
+# Create and develop the package
+neuroscript init my-neurons
+cd my-neurons
+# ... write neurons in src/ ...
+
+# Generate keys and publish
+neuroscript keygen my-neurons
+neuroscript publish
+
+# Push to git
+git add -A && git commit -m "v0.1.0"
+git push origin main
+```
+
+### Consumer Side
+
+```bash
+# Add and fetch the dependency
+neuroscript add my-neurons \
+  --git "https://github.com/user/my-neurons.git"
+neuroscript fetch
+
+# Checksums are verified automatically during fetch
+# Use the neurons in your project
+neuroscript compile src/model.ns
+```
+
+## Best Practices
+
+- **Commit your lockfile** (`Axon.lock`) to version control for reproducible builds
+- **Generate keys per package** rather than using a single global key
+- **Never share private keys** (`.key` files) - only the public key is embedded in `Axon.toml`
+- **Verify after cloning** - run `neuroscript verify` when working with packages from untrusted sources
+- **Use tags for releases** - pin dependencies to git tags rather than branches for stability
+
+---
+
+# ELU
+
+Source: https://neuroscript-lang.com/docs/primitives/Activations/elu
+
+# ELU
+
+ELU (Exponential Linear Unit)
+
+Smooth activation with negative saturation.
+ELU(x) = x if x > 0, else alpha * (exp(x) - 1)
+
+Parameters:
+- alpha: Scale for negative part (default: 1.0)
+
+Shape Contract:
+- Input: [*shape] arbitrary shape
+- Output: [*shape] same shape as input
+
+Notes:
+- Smooth everywhere, including at x=0
+- Negative values saturate to -alpha
+- Reduces bias shift (mean activations closer to zero)
+- More expensive than ReLU due to exp computation
+- Used in some image classification architectures
+- Element-wise operation (preserves all dimensions)
+
+## Signature
+
+```neuroscript
+neuron ELU(alpha=Float(1.0))
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*shape]`
+
+**Outputs:**
+- `default`: `[*shape]`
+
+## Implementation
+
+```
+Source { source: "core", path: "activations/ELU" }
+```
+
+---
+
+# GELU
+
+Source: https://neuroscript-lang.com/docs/primitives/Activations/gelu
+
+# GELU
+
+Gaussian Error Linear Unit (GELU)
+
+A smooth approximation of ReLU commonly used in transformer models.
+GELU(x) = x * CDF(x) where CDF is the cumulative distribution function
+of the standard Gaussian distribution.
+
+Shape Contract:
+- Input: [*shape] arbitrary shape
+- Output: [*shape] same shape as input
+
+Notes:
+- Used in BERT, GPT-2, and many modern transformers
+- Smoother than ReLU, which can help with gradient flow
+- Element-wise operation (preserves all dimensions)
+
+## Signature
+
+```neuroscript
+neuron GELU()
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*shape]`
+
+**Outputs:**
+- `default`: `[*shape]`
+
+## Implementation
+
+```
+Source { source: "core", path: "activations/GELU" }
+```
+
+---
+
+# Mish
+
+Source: https://neuroscript-lang.com/docs/primitives/Activations/mish
+
+# Mish
+
+Mish Activation
+
+Self-regularized non-monotonic activation function.
+Mish(x) = x * tanh(softplus(x)) = x * tanh(ln(1 + exp(x)))
+
+Shape Contract:
+- Input: [*shape] arbitrary shape
+- Output: [*shape] same shape as input
+
+Notes:
+- Smooth, non-monotonic activation
+- Self-regularizing properties
+- Used in YOLOv4 and other modern architectures
+- Slightly more expensive than ReLU but often better performance
+- No vanishing gradient for negative inputs (unlike ReLU)
+- Element-wise operation (preserves all dimensions)
+
+## Signature
+
+```neuroscript
+neuron Mish()
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*shape]`
+
+**Outputs:**
+- `default`: `[*shape]`
+
+## Implementation
+
+```
+Source { source: "core", path: "activations/Mish" }
+```
+
+---
+
+# PReLU
+
+Source: https://neuroscript-lang.com/docs/primitives/Activations/prelu
+
+# PReLU
+
+PReLU (Parametric ReLU)
+
+ReLU with learnable slope for negative values.
+PReLU(x) = max(0, x) + a * min(0, x) where a is learnable.
+
+Parameters:
+- num_parameters: Number of learnable parameters (1 or num_features)
+- init: Initial value of a (default: 0.25)
+
+Shape Contract:
+- Input: [*shape] arbitrary shape
+- Output: [*shape] same shape as input
+
+Notes:
+- If num_parameters=1, single shared slope for all channels
+- If num_parameters=channels, per-channel slopes
+- Learnable parameter a typically initialized to 0.25
+- Reduces dying ReLU problem
+- Used in image classification networks
+- Element-wise operation (preserves all dimensions)
+
+## Signature
+
+```neuroscript
+neuron PReLU(num_parameters=Int(1), init=Float(0.25))
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*shape]`
+
+**Outputs:**
+- `default`: `[*shape]`
+
+## Implementation
+
+```
+Source { source: "core", path: "activations/PReLU" }
+```
+
+---
+
+# ReLU
+
+Source: https://neuroscript-lang.com/docs/primitives/Activations/relu
+
+# ReLU
+
+Rectified Linear Unit (ReLU)
+
+Simple non-linear activation that outputs max(0, x). One of the most
+widely used activation functions in deep learning due to its simplicity
+and effectiveness.
+
+Shape Contract:
+- Input: [*shape] arbitrary shape
+- Output: [*shape] same shape as input
+
+Notes:
+- Element-wise operation: ReLU(x) = max(0, x)
+- Non-differentiable at x=0 (subgradient is typically used)
+- Can suffer from dying ReLU problem (neurons output 0 for all inputs)
+- Fast to compute, no vanishing gradient for positive inputs
+
+## Signature
+
+```neuroscript
+neuron ReLU()
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*shape]`
+
+**Outputs:**
+- `default`: `[*shape]`
+
+## Implementation
+
+```
+Source { source: "core", path: "activations/ReLU" }
+```
+
+---
+
+# Sigmoid
+
+Source: https://neuroscript-lang.com/docs/primitives/Activations/sigmoid
+
+# Sigmoid
+
+Sigmoid Activation
+
+Maps input values to the range (0, 1) using the logistic function.
+Commonly used for binary classification outputs and gating mechanisms.
+
+Shape Contract:
+- Input: [*shape] arbitrary shape
+- Output: [*shape] same shape as input
+
+Formula: sigmoid(x) = 1 / (1 + exp(-x))
+
+Notes:
+- Output range: (0, 1), useful for probabilities
+- Suffers from vanishing gradients for large absolute values
+- Used in LSTMs, attention gates, and output layers
+- Element-wise operation (preserves all dimensions)
+
+## Signature
+
+```neuroscript
+neuron Sigmoid()
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*shape]`
+
+**Outputs:**
+- `default`: `[*shape]`
+
+## Implementation
+
+```
+Source { source: "core", path: "activations/Sigmoid" }
+```
+
+---
+
+# SiLU
+
+Source: https://neuroscript-lang.com/docs/primitives/Activations/silu
+
+# SiLU
+
+SiLU Activation (Swish)
+
+Sigmoid Linear Unit: x * sigmoid(x)
+Self-gated activation that often outperforms ReLU in deep networks.
+
+Shape Contract:
+- Input: [*shape] arbitrary shape
+- Output: [*shape] same shape as input
+
+Notes:
+- Formula: SiLU(x) = x * sigmoid(x)
+- Also known as Swish activation (Google Brain, 2017)
+- Smooth approximation with learnable properties
+- Used in EfficientNet, GPT-NeoX, LLaMA, and modern architectures
+- Slightly more expensive than ReLU but often better performance
+- Element-wise operation (preserves all dimensions)
+
+## Signature
+
+```neuroscript
+neuron SiLU()
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*shape]`
+
+**Outputs:**
+- `default`: `[*shape]`
+
+## Implementation
+
+```
+Source { source: "core", path: "activations/SiLU" }
+```
+
+---
+
+# Softmax
+
+Source: https://neuroscript-lang.com/docs/primitives/Activations/softmax
+
+# Softmax
+
+Softmax Activation
+
+Normalizes input into a probability distribution along the specified dimension.
+Output values sum to 1 and are all positive, making it ideal for classification.
+
+Parameters:
+- dim: Dimension along which softmax is computed (typically last dimension)
+
+Shape Contract:
+- Input: [*, dim] where dim is the dimension to normalize
+- Output: [*, dim] same shape as input, normalized along dim
+
+Notes:
+- Formula: softmax(x_i) = exp(x_i) / sum(exp(x_j))
+- Output sums to 1.0 along the specified dimension
+- Used for multi-class classification and attention weights
+- Numerically stable implementations subtract max(x) before exp
+- Cross-entropy loss often includes built-in softmax (use raw logits)
+
+## Signature
+
+```neuroscript
+neuron Softmax(dim)
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*, dim]`
+
+**Outputs:**
+- `default`: `[*, dim]`
+
+## Implementation
+
+```
+Source { source: "core", path: "activations/Softmax" }
+```
+
+---
+
+# Tanh
+
+Source: https://neuroscript-lang.com/docs/primitives/Activations/tanh
+
+# Tanh
+
+Tanh Activation
+
+Hyperbolic tangent - maps input values to the range (-1, 1).
+Zero-centered output makes it preferable to sigmoid in hidden layers.
+
+Shape Contract:
+- Input: [*shape] arbitrary shape
+- Output: [*shape] same shape as input
+
+Notes:
+- Formula: tanh(x) = (exp(x) - exp(-x)) / (exp(x) + exp(-x))
+- Output range: (-1, 1), zero-centered
+- Stronger gradients than sigmoid near zero
+- Still suffers from vanishing gradients for large values
+- Used in LSTMs, RNNs, and as output activation for bounded values
+- Element-wise operation (preserves all dimensions)
+
+## Signature
+
+```neuroscript
+neuron Tanh()
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*shape]`
+
+**Outputs:**
+- `default`: `[*shape]`
+
+## Implementation
+
+```
+Source { source: "core", path: "activations/Tanh" }
+```
+
+---
+
+# MultiHeadSelfAttention
+
+Source: https://neuroscript-lang.com/docs/primitives/Attention/multiheadselfattention
+
+# MultiHeadSelfAttention
+
+Multi-Head Self-Attention
+
+Complete multi-head self-attention mechanism where queries, keys, and values
+all come from the same input. Core component of transformer architectures.
+
+Parameters:
+- dim: Model dimension (d_model)
+- num_heads: Number of attention heads (dim must be divisible by num_heads)
+
+Shape Contract:
+- Input: [*, seq_len, dim] sequence of embeddings
+- Output: [*, seq_len, dim] attended sequence (same shape)
+
+Notes:
+- Includes Q, K, V projections and output projection
+- head_dim = dim / num_heads
+- Each head attends independently, results are concatenated
+- Self-attention: Q, K, V all derived from same input
+- Can support causal masking for autoregressive models
+- Used in BERT, GPT, and virtually all transformers
+
+## Signature
+
+```neuroscript
+neuron MultiHeadSelfAttention(dim, num_heads)
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*, seq_len, dim]`
+
+**Outputs:**
+- `default`: `[*, seq_len, dim]`
+
+## Implementation
+
+```
+Source { source: "core", path: "attention/MultiHeadSelfAttention" }
+```
+
+---
+
+# ScaledDotProductAttention
+
+Source: https://neuroscript-lang.com/docs/primitives/Attention/scaleddotproductattention
+
+# ScaledDotProductAttention
+
+Scaled Dot-Product Attention
+
+Core attention mechanism: Attention(Q, K, V) = softmax(QK^T / sqrt(d_k))V
+From the original Transformer paper (Vaswani et al., 2017).
+
+Parameters:
+- d_k: Dimension of keys (for scaling factor sqrt(d_k))
+
+Shape Contract:
+- Input query: [*, seq_q, d_k] query vectors
+- Input key: [*, seq_k, d_k] key vectors
+- Input value: [*, seq_v, d_v] value vectors (seq_v == seq_k)
+- Output: [*, seq_q, d_v] attention-weighted values
+
+Notes:
+- Scaling by sqrt(d_k) prevents softmax saturation
+- No learnable parameters (projections are in outer layer)
+- Building block for multi-head attention
+- Can include optional attention mask for causal/padding masking
+
+## Signature
+
+```neuroscript
+neuron ScaledDotProductAttention(d_k)
+```
+
+## Ports
+
+**Inputs:**
+- `query`: `[*, seq_q, d_k]`
+- `key`: `[*, seq_k, d_k]`
+- `value`: `[*, seq_v, d_v]`
+
+**Outputs:**
+- `default`: `[*, seq_q, d_v]`
+
+## Implementation
+
+```
+Source { source: "core", path: "attention/ScaledDotProductAttention" }
+```
+
+---
+
+# Linear
+
+Source: https://neuroscript-lang.com/docs/primitives/Basics/linear
+
+# Linear
+
+Linear (Fully-Connected Layer)
+
+Applies a linear transformation to the incoming data: y = xW^T + b
+This is a shape-aware wrapper around torch.nn.Linear that validates
+tensor dimensions according to NeuroScript shape algebra.
+
+Parameters:
+- in_dim: Size of each input sample (last dimension)
+- out_dim: Size of each output sample (last dimension)
+
+Shape Contract:
+- Input: [*, in_dim] where * means any number of leading dimensions
+- Output: [*, out_dim] with same leading dimensions as input
+
+Notes:
+- Preserves all leading dimensions (broadcasting-compatible)
+- Weight shape: [out_dim, in_dim]
+- Includes learnable bias by default
+
+## Signature
+
+```neuroscript
+neuron Linear(in_dim, out_dim)
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*, in_dim]`
+
+**Outputs:**
+- `default`: `[*, out_dim]`
+
+## Implementation
+
+```
+External { kwargs: [] }
+```
+
+---
+
+# Conv1d
+
+Source: https://neuroscript-lang.com/docs/primitives/Convolutions/conv1d
+
+# Conv1d
+
+1D Convolutional Layer
+
+Applies 1D convolution over an input signal (sequences, time series, audio).
+
+Parameters:
+- in_channels: Number of channels in input
+- out_channels: Number of channels produced by convolution
+- kernel_size: Size of the convolving kernel
+- stride: Stride of the convolution (default: 1)
+- padding: Zero-padding added to both sides (default: 0)
+- dilation: Spacing between kernel elements (default: 1)
+- groups: Number of blocked connections (default: 1)
+- bias: If true, adds learnable bias (default: true)
+
+Shape Contract:
+- Input: [batch, in_channels, length]
+- Output: [batch, out_channels, out_length]
+
+Notes:
+- Output length: (length + 2*padding - dilation*(kernel_size-1) - 1) / stride + 1
+- Used for sequence modeling, audio processing, time series
+- WaveNet, TCN, and other temporal architectures
+
+## Signature
+
+```neuroscript
+neuron Conv1d(in_channels, out_channels, kernel_size, stride=Int(1), padding=Int(0), dilation=Int(1), groups=Int(1), bias=Bool(true))
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[batch, in_channels, length]`
+
+**Outputs:**
+- `default`: `[batch, out_channels, *]`
+
+## Implementation
+
+```
+Source { source: "core", path: "convolutions/Conv1d" }
+```
+
+---
+
+# Conv2d
+
+Source: https://neuroscript-lang.com/docs/primitives/Convolutions/conv2d
+
+# Conv2d
+
+2D Convolutional Layer
+
+Applies a 2D convolution over an input signal composed of several input planes.
+Fundamental building block for computer vision models (CNNs).
+
+Parameters:
+- in_channels: Number of channels in the input image
+- out_channels: Number of channels produced by the convolution
+- kernel_size: Size of the convolving kernel (int or (height, width))
+- stride: Stride of the convolution (default: 1)
+- padding: Zero-padding added to both sides (default: 0)
+- dilation: Spacing between kernel elements (default: 1)
+- groups: Number of blocked connections (default: 1)
+- bias: If true, adds learnable bias (default: true)
+
+Shape Contract:
+- Input: [batch, in_channels, height, width]
+- Output: [batch, out_channels, out_height, out_width]
+
+Notes:
+- Output spatial size: (input_size + 2*padding - kernel_size) / stride + 1
+- Common patterns: 3x3 kernel, stride=1, padding=1 (preserves size)
+- Depthwise: groups=in_channels, separable convolutions
+
+## Signature
+
+```neuroscript
+neuron Conv2d(in_channels, out_channels, kernel_size, stride=Int(1), padding=Int(0), dilation=Int(1), groups=Int(1), bias=Bool(true))
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[batch, in_channels, height, width]`
+
+**Outputs:**
+- `default`: `[batch, out_channels, *, *]`
+
+## Implementation
+
+```
+Source { source: "core", path: "convolutions/Conv2d" }
+```
+
+---
+
+# Conv3d
+
+Source: https://neuroscript-lang.com/docs/primitives/Convolutions/conv3d
+
+# Conv3d
+
+3D Convolutional Layer
+
+Applies 3D convolution over volumetric data (video, 3D medical imaging).
+
+Parameters:
+- in_channels: Number of channels in input
+- out_channels: Number of channels produced by convolution
+- kernel_size: Size of the convolving kernel (int or (d, h, w))
+- stride: Stride of the convolution (default: 1)
+- padding: Zero-padding added to all sides (default: 0)
+- dilation: Spacing between kernel elements (default: 1)
+- groups: Number of blocked connections (default: 1)
+- bias: If true, adds learnable bias (default: true)
+
+Shape Contract:
+- Input: [batch, in_channels, depth, height, width]
+- Output: [batch, out_channels, out_depth, out_height, out_width]
+
+Notes:
+- Output size per dim: (size + 2*padding - dilation*(kernel-1) - 1) / stride + 1
+- Used for video understanding, 3D medical imaging, point clouds
+- Memory intensive due to 5D tensors
+
+## Signature
+
+```neuroscript
+neuron Conv3d(in_channels, out_channels, kernel_size, stride=Int(1), padding=Int(0), dilation=Int(1), groups=Int(1), bias=Bool(true))
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[batch, in_channels, depth, height, width]`
+
+**Outputs:**
+- `default`: `[batch, out_channels, *, *, *]`
+
+## Implementation
+
+```
+Source { source: "core", path: "convolutions/Conv3d" }
+```
+
+---
+
+# DepthwiseConv
+
+Source: https://neuroscript-lang.com/docs/primitives/Convolutions/depthwiseconv
+
+# DepthwiseConv
+
+Depthwise Convolution
+
+Applies separate convolution to each input channel independently.
+Each channel is convolved with its own set of filters.
+
+Parameters:
+- channels: Number of input/output channels (same for depthwise)
+- kernel_size: Size of the convolving kernel
+- stride: Stride of the convolution (default: 1)
+- padding: Zero-padding added to both sides (default: 0)
+- dilation: Spacing between kernel elements (default: 1)
+- bias: If true, adds learnable bias (default: true)
+
+Shape Contract:
+- Input: [batch, channels, height, width]
+- Output: [batch, channels, out_height, out_width]
+
+Notes:
+- Equivalent to Conv2d with groups=in_channels
+- Much fewer parameters than standard conv: kernel_size^2 * channels
+- Used in MobileNet, EfficientNet for efficient computation
+- Often followed by pointwise (1x1) convolution
+
+## Signature
+
+```neuroscript
+neuron DepthwiseConv(channels, kernel_size, stride=Int(1), padding=Int(0), dilation=Int(1), bias=Bool(true))
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[batch, channels, height, width]`
+
+**Outputs:**
+- `default`: `[batch, channels, *, *]`
+
+## Implementation
+
+```
+Source { source: "core", path: "convolutions/DepthwiseConv" }
+```
+
+---
+
+# SeparableConv
+
+Source: https://neuroscript-lang.com/docs/primitives/Convolutions/separableconv
+
+# SeparableConv
+
+Separable Convolution (Depthwise Separable)
+
+Factorizes standard convolution into depthwise and pointwise operations.
+Depthwise: per-channel spatial convolution. Pointwise: 1x1 channel mixing.
+
+Parameters:
+- in_channels: Number of input channels
+- out_channels: Number of output channels
+- kernel_size: Size of the depthwise kernel
+- stride: Stride of the convolution (default: 1)
+- padding: Zero-padding added to both sides (default: 0)
+- dilation: Spacing between kernel elements (default: 1)
+- bias: If true, adds learnable bias (default: true)
+
+Shape Contract:
+- Input: [batch, in_channels, height, width]
+- Output: [batch, out_channels, out_height, out_width]
+
+Notes:
+- Reduces computation: from kernel^2 * in * out to kernel^2 * in + in * out
+- Core building block of MobileNet, Xception, EfficientNet
+- Combines DepthwiseConv + 1x1 Conv (pointwise)
+- Similar accuracy to standard conv with far fewer parameters
+
+## Signature
+
+```neuroscript
+neuron SeparableConv(in_channels, out_channels, kernel_size, stride=Int(1), padding=Int(0), dilation=Int(1), bias=Bool(true))
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[batch, in_channels, height, width]`
+
+**Outputs:**
+- `default`: `[batch, out_channels, *, *]`
+
+## Implementation
+
+```
+Source { source: "core", path: "convolutions/SeparableConv" }
+```
+
+---
+
+# TransposedConv
+
+Source: https://neuroscript-lang.com/docs/primitives/Convolutions/transposedconv
+
+# TransposedConv
+
+Transposed Convolution (Deconvolution)
+
+Upsampling convolution that increases spatial dimensions.
+Also known as deconvolution or fractionally-strided convolution.
+
+Parameters:
+- in_channels: Number of input channels
+- out_channels: Number of output channels
+- kernel_size: Size of the convolving kernel
+- stride: Stride of the convolution (default: 1)
+- padding: Zero-padding added to both sides (default: 0)
+- output_padding: Additional size added to output (default: 0)
+- dilation: Spacing between kernel elements (default: 1)
+- groups: Number of blocked connections (default: 1)
+- bias: If true, adds learnable bias (default: true)
+
+Shape Contract:
+- Input: [batch, in_channels, height, width]
+- Output: [batch, out_channels, out_height, out_width]
+
+Notes:
+- Output size: (input - 1) * stride - 2*padding + kernel_size + output_padding
+- Used in decoder networks, GANs, segmentation
+- Learnable upsampling (vs interpolation)
+- Can cause checkerboard artifacts if not used carefully
+
+## Signature
+
+```neuroscript
+neuron TransposedConv(in_channels, out_channels, kernel_size, stride=Int(1), padding=Int(0), output_padding=Int(0), dilation=Int(1), groups=Int(1), bias=Bool(true))
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[batch, in_channels, height, width]`
+
+**Outputs:**
+- `default`: `[batch, out_channels, *, *]`
+
+## Implementation
+
+```
+Source { source: "core", path: "convolutions/TransposedConv" }
+```
+
+---
+
+# Embedding
+
+Source: https://neuroscript-lang.com/docs/primitives/Embeddings/embedding
+
+# Embedding
+
+Token Embedding
+
+Maps discrete token indices to dense continuous vectors. Fundamental
+component for processing text, categorical data, or any discrete symbols.
+
+Parameters:
+- num_embeddings: Size of the vocabulary (number of unique tokens)
+- embedding_dim: Dimension of the dense embedding vectors
+
+Shape Contract:
+- Input: [*, seq_len] integer token indices
+- Output: [*, seq_len, embedding_dim] dense embeddings
+
+Notes:
+- Input indices must be in range [0, num_embeddings)
+- Embeddings are learned parameters (initialized randomly)
+- Common in NLP: word embeddings, position embeddings, token type embeddings
+
+## Signature
+
+```neuroscript
+neuron Embedding(num_embeddings, embedding_dim)
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*, seq_len]`
+
+**Outputs:**
+- `default`: `[*, seq_len, embedding_dim]`
+
+## Implementation
+
+```
+Source { source: "core", path: "embeddings/Embedding" }
+```
+
+---
+
+# LearnedPositionalEmbedding
+
+Source: https://neuroscript-lang.com/docs/primitives/Embeddings/learnedpositionalembedding
+
+# LearnedPositionalEmbedding
+
+Learned Positional Embedding
+
+Adds learnable position embeddings to input sequences. Unlike sinusoidal
+encoding, positions are learned during training.
+
+Parameters:
+- max_positions: Maximum sequence length supported
+- embedding_dim: Dimension of the embeddings (must match input)
+
+Shape Contract:
+- Input: [*, seq_len, embedding_dim] sequence of embeddings
+- Output: [*, seq_len, embedding_dim] embeddings with positions added
+
+Notes:
+- Position embeddings are learned parameters (not fixed functions)
+- Used in BERT, GPT-2, RoBERTa
+- Cannot extrapolate beyond max_positions
+- Embedding table shape: [max_positions, embedding_dim]
+- Positions are added (not concatenated) to input embeddings
+- More flexible than sinusoidal but requires training
+
+## Signature
+
+```neuroscript
+neuron LearnedPositionalEmbedding(max_positions, embedding_dim)
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*, seq_len, embedding_dim]`
+
+**Outputs:**
+- `default`: `[*, seq_len, embedding_dim]`
+
+## Implementation
+
+```
+Source { source: "core", path: "embeddings/LearnedPositionalEmbedding" }
+```
+
+---
+
+# PositionalEncoding
+
+Source: https://neuroscript-lang.com/docs/primitives/Embeddings/positionalencoding
+
+# PositionalEncoding
+
+Positional Encoding (Sinusoidal)
+
+Adds fixed sinusoidal position information to input sequences.
+From the original Transformer paper (Vaswani et al., 2017).
+
+Parameters:
+- dim: Embedding dimension (must match input)
+- max_len: Maximum sequence length to precompute
+
+Shape Contract:
+- Input: [*, seq_len, dim] sequence of embeddings
+- Output: [*, seq_len, dim] embeddings with positions added
+
+Notes:
+- Formula: PE(pos, 2i) = sin(pos / 10000^(2i/d))
+- Formula: PE(pos, 2i+1) = cos(pos / 10000^(2i/d))
+- No learnable parameters (fixed encoding)
+- Can extrapolate to longer sequences than trained on
+- Encodes both absolute and relative position information
+- Used in original Transformer, still common in many architectures
+
+## Signature
+
+```neuroscript
+neuron PositionalEncoding(dim, max_len)
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*, seq_len, dim]`
+
+**Outputs:**
+- `default`: `[*, seq_len, dim]`
+
+## Implementation
+
+```
+Source { source: "core", path: "embeddings/PositionalEncoding" }
+```
+
+---
+
+# RotaryEmbedding
+
+Source: https://neuroscript-lang.com/docs/primitives/Embeddings/rotaryembedding
+
+# RotaryEmbedding
+
+Rotary Position Embedding (RoPE)
+
+Rotates query and key tensors to encode relative positional information.
+Based on "RoFormer: Enhanced Transformer with Rotary Position Embedding".
+
+Parameters:
+- dim: Embedding dimension (head_dim)
+- max_position_embeddings: Maximum sequence length to pre-compute (default: 2048)
+- base: Base for the geometric progression of frequencies (default: 10000.0)
+
+## Signature
+
+```neuroscript
+neuron RotaryEmbedding(dim, max_position_embeddings=Int(2048), base=Int(10000))
+```
+
+## Ports
+
+**Inputs:**
+- `query`: `[*batch, seq, num_heads, dim]`
+- `key`: `[*batch, seq, num_heads, dim]`
+
+**Outputs:**
+- `q_out`: `[*batch, seq, num_heads, dim]`
+- `k_out`: `[*batch, seq, num_heads, dim]`
+
+## Implementation
+
+```
+Source { source: "neuroscript", path: "embeddings/RotaryEmbedding" }
+```
+
+---
+
+# BatchNorm
+
+Source: https://neuroscript-lang.com/docs/primitives/Normalization/batchnorm
+
+# BatchNorm
+
+Batch Normalization
+
+Normalizes inputs across the batch dimension, computing mean and variance
+over the batch. Helps stabilize training and enables higher learning rates.
+
+Parameters:
+- num_features: Number of features (channels for CNNs, dimensions for MLPs)
+
+Shape Contract:
+- Input: [*shape, num_features] where num_features is the normalized dimension
+- Output: [*shape, num_features] same shape as input
+
+Notes:
+- Normalizes over batch and spatial dimensions (for CNNs)
+- Includes learnable scale (gamma) and shift (beta) parameters
+- Maintains running statistics (mean, variance) for inference
+- Behavior differs between training and evaluation modes
+- Less stable than LayerNorm for variable batch sizes or sequential data
+
+## Signature
+
+```neuroscript
+neuron BatchNorm(num_features)
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*shape, num_features]`
+
+**Outputs:**
+- `default`: `[*shape, num_features]`
+
+## Implementation
+
+```
+Source { source: "core", path: "normalization/BatchNorm" }
+```
+
+---
+
+# GroupNorm
+
+Source: https://neuroscript-lang.com/docs/primitives/Normalization/groupnorm
+
+# GroupNorm
+
+Group Normalization
+
+Divides channels into groups and normalizes within each group. Works well
+with small batch sizes where BatchNorm becomes unstable.
+
+Parameters:
+- num_groups: Number of groups to divide channels into
+- num_channels: Total number of channels (must be divisible by num_groups)
+
+Shape Contract:
+- Input: [*, num_channels, *, *] feature maps with spatial dimensions
+- Output: [*, num_channels, *, *] same shape as input
+
+Notes:
+- num_channels must be divisible by num_groups
+- Common choices: 32 groups (GPT-style) or num_groups = num_channels (LayerNorm equivalent)
+- Independent of batch size (works with batch_size=1)
+- Includes learnable scale (gamma) and shift (beta) per channel
+- Used in ResNeXt, BigGAN, and many generative models
+- Interpolates between LayerNorm (1 group) and InstanceNorm (channels groups)
+
+## Signature
+
+```neuroscript
+neuron GroupNorm(num_groups, num_channels)
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*, num_channels, *, *]`
+
+**Outputs:**
+- `default`: `[*, num_channels, *, *]`
+
+## Implementation
+
+```
+Source { source: "core", path: "normalization/GroupNorm" }
+```
+
+---
+
+# InstanceNorm
+
+Source: https://neuroscript-lang.com/docs/primitives/Normalization/instancenorm
+
+# InstanceNorm
+
+Instance Normalization
+
+Normalizes each sample independently across spatial dimensions.
+Commonly used in style transfer and image generation.
+
+Parameters:
+- num_features: Number of channels (C dimension)
+- eps: Small constant for numerical stability (default: 1e-5)
+- affine: If true, learnable scale and shift (default: true)
+
+Shape Contract:
+- Input: [batch, num_features, *spatial] feature maps
+- Output: [batch, num_features, *spatial] same shape as input
+
+Notes:
+- Normalizes across spatial dimensions only (not batch or channel)
+- Each instance (sample) normalized independently
+- Equivalent to GroupNorm with num_groups=num_features
+- Removes style information from features
+- Used in neural style transfer, GANs, image-to-image translation
+
+## Signature
+
+```neuroscript
+neuron InstanceNorm(num_features, eps=Float(1e-5), affine=Bool(true))
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[batch, num_features, *spatial]`
+
+**Outputs:**
+- `default`: `[batch, num_features, *spatial]`
+
+## Implementation
+
+```
+Source { source: "core", path: "normalization/InstanceNorm" }
+```
+
+---
+
+# LayerNorm
+
+Source: https://neuroscript-lang.com/docs/primitives/Normalization/layernorm
+
+# LayerNorm
+
+Layer Normalization
+
+Normalizes inputs across the feature dimension, computing mean and
+variance over the last dimension. Essential component in transformer architectures.
+
+Parameters:
+- dim: Normalization dimension (size of the feature axis)
+
+Shape Contract:
+- Input: [*shape, dim] where dim is the normalized dimension
+- Output: [*shape, dim] same shape as input
+
+Notes:
+- Normalizes over last dimension only (per-example normalization)
+- Includes learnable scale (gamma) and shift (beta) parameters
+- More stable than BatchNorm for variable-length sequences
+- Standard in transformers (BERT, GPT, etc.)
+
+## Signature
+
+```neuroscript
+neuron LayerNorm(dim)
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*shape, dim]`
+
+**Outputs:**
+- `default`: `[*shape, dim]`
+
+## Implementation
+
+```
+Source { source: "core", path: "normalization/LayerNorm" }
+```
+
+---
+
+# RMSNorm
+
+Source: https://neuroscript-lang.com/docs/primitives/Normalization/rmsnorm
+
+# RMSNorm
+
+RMS Normalization
+
+Root Mean Square Layer Normalization - efficient variant of LayerNorm.
+Normalizes inputs using only the root mean square (no mean centering).
+
+Parameters:
+- dim: Size of the feature dimension to normalize
+
+Shape Contract:
+- Input: [*, dim] where dim is the normalized dimension
+- Output: [*, dim] same shape as input
+
+Notes:
+- Formula: RMSNorm(x) = x / sqrt(mean(x*x) + eps) * gamma
+- Omits mean subtraction from LayerNorm (only rescales by RMS)
+- 10-15% faster than LayerNorm with similar performance
+- Used in LLaMA, T5, and other modern transformers
+- Includes learnable scale parameter (gamma)
+- Particularly effective in large language models
+
+## Signature
+
+```neuroscript
+neuron RMSNorm(dim)
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*, dim]`
+
+**Outputs:**
+- `default`: `[*, dim]`
+
+## Implementation
+
+```
+Source { source: "core", path: "normalization/RMSNorm" }
+```
+
+---
+
+# Bias
+
+Source: https://neuroscript-lang.com/docs/primitives/Operations/bias
+
+# Bias
+
+Bias
+
+Adds a learnable bias vector to the input tensor. Simple additive operation
+applied element-wise along the last dimension.
+
+Parameters:
+- dim: Size of the bias vector (must match last dimension of input)
+
+Shape Contract:
+- Input: [*, dim] tensor with last dimension matching bias size
+- Output: [*, dim] same shape as input
+
+Notes:
+- Learnable parameter: bias vector of shape [dim]
+- Applied element-wise: out = input + bias
+- Often combined with Linear (which can include or exclude bias)
+- Useful when separating weight and bias learning rates
+
+## Signature
+
+```neuroscript
+neuron Bias(dim)
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*, dim]`
+
+**Outputs:**
+- `default`: `[*, dim]`
+
+## Implementation
+
+```
+Source { source: "core", path: "operations/Bias" }
+```
+
+---
+
+# Einsum
+
+Source: https://neuroscript-lang.com/docs/primitives/Operations/einsum
+
+# Einsum
+
+Einsum
+
+Einstein summation for generalized tensor contractions. Expresses complex
+tensor operations in a concise notation.
+
+Parameters:
+- equation: Einsum equation string (e.g., "bij,bjk->bik" for batched matmul)
+
+Shape Contract:
+- Input a: [*shape_a] first tensor
+- Input b: [*shape_b] second tensor (optional, depends on equation)
+- Output: [*shape_out] result shape determined by equation
+
+Notes:
+- No learnable parameters (pure operation)
+- Supports 1-3 input tensors depending on equation
+- Examples:
+- "ij->ji" - transpose
+- "bij,bjk->bik" - batched matrix multiply
+- "bhqd,bhkd->bhqk" - attention scores
+- Powerful but can be slower than specialized operations
+
+## Signature
+
+```neuroscript
+neuron Einsum(equation)
+```
+
+## Ports
+
+**Inputs:**
+- `a`: `[*shape_a]`
+- `b`: `[*shape_b]`
+
+**Outputs:**
+- `default`: `[*shape_out]`
+
+## Implementation
+
+```
+Source { source: "core", path: "operations/Einsum" }
+```
+
+---
+
+# Identity
+
+Source: https://neuroscript-lang.com/docs/primitives/Operations/identity
+
+# Identity
+
+Identity Operation
+
+Returns input unchanged. Useful as a placeholder, in conditional branches,
+or when an operation slot requires a neuron but no transform is needed.
+
+Shape Contract:
+- Input: [*shape] arbitrary shape
+- Output: [*shape] same shape as input (unchanged)
+
+Notes:
+- No learnable parameters
+- Zero computational cost (just returns input reference)
+- Useful in pattern matching for do-nothing branches
+- Can serve as placeholder during architecture development
+- Used in residual connections when skip path needs no transform
+
+## Signature
+
+```neuroscript
+neuron Identity()
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*shape]`
+
+**Outputs:**
+- `default`: `[*shape]`
+
+## Implementation
+
+```
+Source { source: "core", path: "structural/Identity" }
+```
+
+---
+
+# MatMul
+
+Source: https://neuroscript-lang.com/docs/primitives/Operations/matmul
+
+# MatMul
+
+MatMul
+
+Matrix multiplication of two input tensors. Performs batched matrix
+multiplication following PyTorch broadcasting rules.
+
+Shape Contract:
+- Input a: [*, n, m] first matrix
+- Input b: [*, m, p] second matrix (inner dimension must match)
+- Output: [*, n, p] matrix product
+
+Notes:
+- No learnable parameters (pure operation)
+- Supports batched operations with broadcasting
+- Inner dimensions must match: a.shape[-1] == b.shape[-2]
+- Core operation for attention mechanisms
+- Uses torch.matmul for optimal performance
+
+## Signature
+
+```neuroscript
+neuron MatMul()
+```
+
+## Ports
+
+**Inputs:**
+- `a`: `[*, n, m]`
+- `b`: `[*, m, p]`
+
+**Outputs:**
+- `default`: `[*, n, p]`
+
+## Implementation
+
+```
+Source { source: "core", path: "operations/MatMul" }
+```
+
+---
+
+# Scale
+
+Source: https://neuroscript-lang.com/docs/primitives/Operations/scale
+
+# Scale
+
+Scale
+
+Multiplies input by a learnable scale vector. Element-wise multiplicative
+scaling applied along the last dimension.
+
+Parameters:
+- dim: Size of the scale vector (must match last dimension of input)
+
+Shape Contract:
+- Input: [*, dim] tensor with last dimension matching scale size
+- Output: [*, dim] same shape as input
+
+Notes:
+- Learnable parameter: scale vector of shape [dim], initialized to 1
+- Applied element-wise: out = input * scale
+- Used in normalization layers (gamma parameter)
+- Can be used for learned feature weighting
+
+## Signature
+
+```neuroscript
+neuron Scale(dim)
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*, dim]`
+
+**Outputs:**
+- `default`: `[*, dim]`
+
+## Implementation
+
+```
+Source { source: "core", path: "operations/Scale" }
+```
+
+---
+
+# AdaptiveAvgPool
+
+Source: https://neuroscript-lang.com/docs/primitives/Pooling/adaptiveavgpool
+
+# AdaptiveAvgPool
+
+Adaptive Average Pooling
+
+Pools input to a fixed output size regardless of input dimensions.
+Automatically calculates kernel size and stride to achieve target output.
+
+Parameters:
+- output_size: Target spatial size (height and width will both be this value)
+
+Shape Contract:
+- Input: [batch, channels, height, width] (any spatial size)
+- Output: [batch, channels, output_size, output_size]
+
+Notes:
+- Accepts any input spatial size, outputs fixed size
+- output_size=1 is common for global average pooling
+- Used before fully-connected layers to handle variable input sizes
+- No learnable parameters
+- Enables architectures that work with multiple resolutions
+
+## Signature
+
+```neuroscript
+neuron AdaptiveAvgPool(output_size)
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[batch, channels, *, *]`
+
+**Outputs:**
+- `default`: `[batch, channels, output_size, output_size]`
+
+## Implementation
+
+```
+Source { source: "core", path: "pooling/AdaptiveAvgPool" }
+```
+
+---
+
+# AdaptiveMaxPool
+
+Source: https://neuroscript-lang.com/docs/primitives/Pooling/adaptivemaxpool
+
+# AdaptiveMaxPool
+
+Adaptive Max Pooling
+
+Pools input to a fixed output size using max operation.
+Automatically calculates kernel size and stride to achieve target output.
+
+Parameters:
+- output_size: Target spatial size (height and width will both be this value)
+
+Shape Contract:
+- Input: [batch, channels, height, width] (any spatial size)
+- Output: [batch, channels, output_size, output_size]
+
+Notes:
+- Accepts any input spatial size, outputs fixed size
+- output_size=1 is common for global max pooling
+- Used before fully-connected layers to handle variable input sizes
+- No learnable parameters
+- Preserves strongest activations (max values)
+
+## Signature
+
+```neuroscript
+neuron AdaptiveMaxPool(output_size)
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[batch, channels, *, *]`
+
+**Outputs:**
+- `default`: `[batch, channels, output_size, output_size]`
+
+## Implementation
+
+```
+Source { source: "core", path: "pooling/AdaptiveMaxPool" }
+```
+
+---
+
+# AvgPool
+
+Source: https://neuroscript-lang.com/docs/primitives/Pooling/avgpool
+
+# AvgPool
+
+2D Average Pooling
+
+Downsamples by computing the average value in each pooling window.
+Provides smoother downsampling compared to max pooling.
+
+Parameters:
+- kernel_size: Size of the pooling window
+- stride: Stride of the pooling window (default: 1)
+- padding: Zero-padding added to input (default: 0)
+
+Shape Contract:
+- Input: [batch, channels, height, width]
+- Output: [batch, channels, out_height, out_width]
+
+Notes:
+- Output size: floor((input + 2*padding - kernel_size) / stride) + 1
+- Smoother than MaxPool, preserves more spatial information
+- Used in ResNet final pooling and some attention mechanisms
+- No learnable parameters
+- Preserves channel count
+
+## Signature
+
+```neuroscript
+neuron AvgPool(kernel_size, stride=Int(1), padding=Int(0))
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[batch, channels, height, width]`
+
+**Outputs:**
+- `default`: `[batch, channels, *, *]`
+
+## Implementation
+
+```
+Source { source: "core", path: "pooling/AvgPool" }
+```
+
+---
+
+# GlobalAvgPool
+
+Source: https://neuroscript-lang.com/docs/primitives/Pooling/globalavgpool
+
+# GlobalAvgPool
+
+Global Average Pooling
+
+Reduces each channel to a single value by averaging all spatial positions.
+Commonly used as the final pooling before classification head.
+
+Shape Contract:
+- Input: [batch, channels, height, width] (any spatial size)
+- Output: [batch, channels, 1, 1] single value per channel
+
+Notes:
+- Equivalent to AdaptiveAvgPool(1)
+- Reduces spatial dimensions to 1x1
+- No learnable parameters
+- Reduces overfitting compared to large fully-connected layers
+- Works with any input resolution
+- Standard in ResNet, EfficientNet, and modern CNNs
+
+## Signature
+
+```neuroscript
+neuron GlobalAvgPool()
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[batch, channels, *, *]`
+
+**Outputs:**
+- `default`: `[batch, channels, 1, 1]`
+
+## Implementation
+
+```
+Source { source: "core", path: "pooling/GlobalAvgPool" }
+```
+
+---
+
+# GlobalMaxPool
+
+Source: https://neuroscript-lang.com/docs/primitives/Pooling/globalmaxpool
+
+# GlobalMaxPool
+
+Global Max Pooling
+
+Reduces each channel to a single value by taking the maximum across
+all spatial positions.
+
+Shape Contract:
+- Input: [batch, channels, height, width] (any spatial size)
+- Output: [batch, channels, 1, 1] single value per channel
+
+Notes:
+- Equivalent to AdaptiveMaxPool(1)
+- Reduces spatial dimensions to 1x1
+- No learnable parameters
+- Preserves strongest activation in each channel
+- Works with any input resolution
+- Less common than GlobalAvgPool but useful for detection tasks
+
+## Signature
+
+```neuroscript
+neuron GlobalMaxPool()
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[batch, channels, *, *]`
+
+**Outputs:**
+- `default`: `[batch, channels, 1, 1]`
+
+## Implementation
+
+```
+Source { source: "core", path: "pooling/GlobalMaxPool" }
+```
+
+---
+
+# MaxPool
+
+Source: https://neuroscript-lang.com/docs/primitives/Pooling/maxpool
+
+# MaxPool
+
+2D Max Pooling
+
+Downsamples by taking the maximum value in each pooling window.
+Commonly used in CNNs to reduce spatial dimensions while preserving
+the strongest activations.
+
+Parameters:
+- kernel_size: Size of the pooling window
+- stride: Stride of the pooling window (default: 1)
+- padding: Zero-padding added to input (default: 0)
+- dilation: Spacing between kernel elements (default: 1)
+
+Shape Contract:
+- Input: [batch, channels, height, width]
+- Output: [batch, channels, out_height, out_width]
+
+Notes:
+- Output size: floor((input + 2*padding - kernel_size) / stride) + 1
+- Common pattern: kernel_size=2, stride=2 (halves spatial dimensions)
+- Provides translation invariance
+- No learnable parameters
+- Preserves channel count
+
+## Signature
+
+```neuroscript
+neuron MaxPool(kernel_size, stride=Int(1), padding=Int(0), dilation=Int(1))
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[batch, channels, height, width]`
+
+**Outputs:**
+- `default`: `[batch, channels, *, *]`
+
+## Implementation
+
+```
+Source { source: "core", path: "pooling/MaxPool" }
+```
+
+---
+
+# DropConnect
+
+Source: https://neuroscript-lang.com/docs/primitives/Regularization/dropconnect
+
+# DropConnect
+
+DropConnect Regularization
+
+Randomly zeros individual weights (connections) during training rather than
+activations. Provides stronger regularization than standard Dropout.
+
+Parameters:
+- drop_prob: Probability of a connection being zeroed (0 to 1)
+
+Shape Contract:
+- Input: [*shape] arbitrary shape
+- Output: [*shape] same shape as input
+
+Notes:
+- Drops weights, not activations (unlike Dropout)
+- Applied to the connection weights during forward pass
+- More fine-grained than Dropout
+- Only active during training
+- Used in EfficientNet and some attention mechanisms
+- Outputs scaled to maintain expected values
+
+## Signature
+
+```neuroscript
+neuron DropConnect(drop_prob)
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*shape]`
+
+**Outputs:**
+- `default`: `[*shape]`
+
+## Implementation
+
+```
+Source { source: "core", path: "regularization/DropConnect" }
+```
+
+---
+
+# Dropout
+
+Source: https://neuroscript-lang.com/docs/primitives/Regularization/dropout
+
+# Dropout
+
+Dropout Regularization
+
+Randomly zeros elements during training to prevent overfitting.
+During evaluation, the layer is a no-op (identity function).
+
+Parameters:
+- p: Probability of an element being zeroed (0 to 1, typical: 0.1-0.5)
+
+Shape Contract:
+- Input: [*shape] arbitrary shape
+- Output: [*shape] same shape as input
+
+Notes:
+- Outputs are scaled by 1/(1-p) during training to maintain expected values
+- Only active during training (disabled during evaluation)
+- Common dropout rates: 0.1 (mild), 0.3 (moderate), 0.5 (strong)
+
+## Signature
+
+```neuroscript
+neuron Dropout(p)
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*shape]`
+
+**Outputs:**
+- `default`: `[*shape]`
+
+## Implementation
+
+```
+Source { source: "core", path: "regularization/Dropout" }
+```
+
+---
+
+# DropPath
+
+Source: https://neuroscript-lang.com/docs/primitives/Regularization/droppath
+
+# DropPath
+
+DropPath Regularization (Stochastic Depth)
+
+Randomly drops entire residual paths during training. Enables training
+of very deep networks by making depth stochastic during training.
+
+Parameters:
+- drop_prob: Probability of dropping the entire path (0 to 1)
+
+Shape Contract:
+- Input: [*shape] arbitrary shape
+- Output: [*shape] same shape as input
+
+Notes:
+- Drops entire layer outputs, not individual neurons
+- When dropped, input passes through unchanged (via residual)
+- Drop probability often increases linearly with depth
+- Key technique for training Vision Transformers (ViT)
+- Only active during training
+- Used in DeiT, Swin Transformer, and EfficientNet
+- Also known as Stochastic Depth
+
+## Signature
+
+```neuroscript
+neuron DropPath(drop_prob)
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*shape]`
+
+**Outputs:**
+- `default`: `[*shape]`
+
+## Implementation
+
+```
+Source { source: "core", path: "regularization/DropPath" }
+```
+
+---
+
+# Add
+
+Source: https://neuroscript-lang.com/docs/primitives/Structural/add
+
+# Add
+
+Element-wise Addition
+
+Adds two tensors element-by-element. Fundamental operation for residual
+connections that enable training of very deep networks.
+
+Shape Contract:
+- Input main: [*shape] primary tensor
+- Input skip: [*shape] tensor to add (must match shape of main)
+- Output: [*shape] element-wise sum
+
+Notes:
+- No learnable parameters (pure element-wise operation)
+- Both inputs must have identical shapes
+- Named inputs (main, skip) follow residual connection convention
+- Enables gradient flow through skip path (solves vanishing gradients)
+- Central to ResNet, Transformers, and most modern architectures
+- out = main + skip
+
+## Signature
+
+```neuroscript
+neuron Add()
+```
+
+## Ports
+
+**Inputs:**
+- `main`: `[*shape]`
+- `skip`: `[*shape]`
+
+**Outputs:**
+- `default`: `[*shape]`
+
+## Implementation
+
+```
+Source { source: "core", path: "structural/Add" }
+```
+
+---
+
+# Concat
+
+Source: https://neuroscript-lang.com/docs/primitives/Structural/concat
+
+# Concat
+
+Concatenate
+
+Joins two or more tensors along an existing axis. All dimensions except
+the concatenation dimension must match.
+
+Parameters:
+- dim: Dimension along which to concatenate (0-indexed)
+
+Shape Contract:
+- Input a: [*shape_a] first tensor
+- Input b: [*shape_b] second tensor
+- Output: [*shape_out] concatenated result
+
+Notes:
+- All dimensions except dim must be equal
+- Example: [2, 3, 4] + [2, 5, 4] along dim=1 gives [2, 8, 4]
+- No learnable parameters (pure structural operation)
+
+## Signature
+
+```neuroscript
+neuron Concat(dim)
+```
+
+## Ports
+
+**Inputs:**
+- `a`: `[*shape_a]`
+- `b`: `[*shape_b]`
+
+**Outputs:**
+- `default`: `[*shape_out]`
+
+## Implementation
+
+```
+Source { source: "core", path: "structural/Concat" }
+```
+
+---
+
+# Flatten
+
+Source: https://neuroscript-lang.com/docs/primitives/Structural/flatten
+
+# Flatten
+
+Flatten
+
+Flattens dimensions from start_dim to end_dim (inclusive) into a single dimension.
+Commonly used to transition from convolutional layers to fully-connected layers.
+
+Parameters:
+- start_dim: First dimension to flatten (default: 1, preserving batch)
+- end_dim: Last dimension to flatten (default: -1, all remaining dims)
+
+Shape Contract:
+- Input: [*shape_in] arbitrary input shape
+- Output: [*shape_out] flattened output (depends on start_dim and end_dim)
+
+Notes:
+- Default behavior: Flatten(1, -1) preserves batch dimension
+- Example: [32, 3, 224, 224] with default params gives [32, 150528]
+- No learnable parameters (pure reshaping operation)
+
+## Signature
+
+```neuroscript
+neuron Flatten(start_dim=Int(1), end_dim=BinOp { op: Sub, left: Int(0), right: Int(1) })
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*shape_in]`
+
+**Outputs:**
+- `default`: `[*shape_out]`
+
+## Implementation
+
+```
+Source { source: "core", path: "structural/Flatten" }
+```
+
+---
+
+# Fork
+
+Source: https://neuroscript-lang.com/docs/primitives/Structural/fork
+
+# Fork
+
+Fork (Duplicate)
+
+Splits a single input into two identical outputs. Essential building block
+for residual connections, parallel processing paths, and skip connections.
+
+Shape Contract:
+- Input: [*shape] arbitrary shape
+- Output main: [*shape] first copy of input
+- Output skip: [*shape] second copy of input
+
+Notes:
+- No learnable parameters (pure structural operation)
+- Zero-copy in most implementations (shares memory)
+- Named outputs (main, skip) for clarity in residual patterns
+- Both outputs are identical references to the input
+- Fundamental for any architecture with parallel paths
+
+## Signature
+
+```neuroscript
+neuron Fork()
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*shape]`
+
+**Outputs:**
+- `main`: `[*shape]`
+- `skip`: `[*shape]`
+
+## Implementation
+
+```
+Source { source: "core", path: "structural/Fork" }
+```
+
+---
+
+# Fork3
+
+Source: https://neuroscript-lang.com/docs/primitives/Structural/fork3
+
+# Fork3
+
+Fork3 (Triple Duplicate)
+
+Splits a single input into three identical outputs. Used for attention
+mechanisms where Q, K, V projections start from the same input.
+
+Shape Contract:
+- Input: [*shape] arbitrary shape
+- Output a: [*shape] first copy
+- Output b: [*shape] second copy
+- Output c: [*shape] third copy
+
+Notes:
+- No learnable parameters (pure structural operation)
+- Zero-copy in most implementations (shares memory)
+- Primary use: self-attention Q/K/V generation
+- All three outputs are identical references to input
+- Can be composed with Fork for more branches
+
+## Signature
+
+```neuroscript
+neuron Fork3()
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*shape]`
+
+**Outputs:**
+- `a`: `[*shape]`
+- `b`: `[*shape]`
+- `c`: `[*shape]`
+
+## Implementation
+
+```
+Source { source: "core", path: "structural/Fork3" }
+```
+
+---
+
+# Multiply
+
+Source: https://neuroscript-lang.com/docs/primitives/Structural/multiply
+
+# Multiply
+
+Element-wise Multiplication
+
+Multiplies two tensors element-by-element. Fundamental operation for
+gating mechanisms, attention weighting, and feature modulation.
+
+Shape Contract:
+- Input a: [*shape] first tensor
+- Input b: [*shape] second tensor (must match shape of a)
+- Output: [*shape] element-wise product
+
+Notes:
+- No learnable parameters (pure element-wise operation)
+- Both inputs must have identical shapes
+- Used in: gating (LSTM, GRU), attention weighting, feature scaling
+- Common pattern: x * sigmoid(gate) for learned gating
+- Supports broadcasting if shapes are compatible
+
+## Signature
+
+```neuroscript
+neuron Multiply()
+```
+
+## Ports
+
+**Inputs:**
+- `a`: `[*shape]`
+- `b`: `[*shape]`
+
+**Outputs:**
+- `default`: `[*shape]`
+
+## Implementation
+
+```
+Source { source: "core", path: "structural/Multiply" }
+```
+
+---
+
+# Pad
+
+Source: https://neuroscript-lang.com/docs/primitives/Structural/pad
+
+# Pad
+
+Pad
+
+Pads tensor with specified value along boundaries.
+
+Parameters:
+- padding: Padding sizes (left, right) or (left, right, top, bottom) etc.
+- value: Padding value (default: 0)
+- mode: Padding mode - constant, reflect, replicate, circular (default: constant)
+
+Shape Contract:
+- Input: [*shape_in] tensor to pad
+- Output: [*shape_out] padded tensor (larger along padded dimensions)
+
+Notes:
+- No learnable parameters (pure structural operation)
+- padding specified from last dim backward: (left, right, top, bottom, ...)
+- Modes:
+- constant: fill with value
+- reflect: reflect values at boundary
+- replicate: repeat edge values
+- circular: wrap around
+- Essential for maintaining spatial size in convolutions
+
+## Signature
+
+```neuroscript
+neuron Pad(padding, value=Int(0), mode=Name("constant"))
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*shape_in]`
+
+**Outputs:**
+- `default`: `[*shape_out]`
+
+## Implementation
+
+```
+Source { source: "core", path: "structural/Pad" }
+```
+
+---
+
+# Reshape
+
+Source: https://neuroscript-lang.com/docs/primitives/Structural/reshape
+
+# Reshape
+
+Reshape
+
+Changes the shape of a tensor without changing its data.
+Total element count must remain the same. Use -1 for one dimension to infer its size.
+
+Parameters:
+- target_shape: Tuple specifying the new shape (can include -1 for inference)
+
+Shape Contract:
+- Input: [*shape_in] tensor with original shape
+- Output: [*shape_out] tensor with new shape (same total elements)
+
+Notes:
+- No learnable parameters (pure structural operation)
+- Total elements must be preserved: prod(shape_in) == prod(shape_out)
+- Use -1 for at most one dimension to auto-calculate
+- Common use: flattening for FC layers, splitting/merging attention heads
+- Data is not copied, only the view changes (memory efficient)
+
+## Signature
+
+```neuroscript
+neuron Reshape(target_shape)
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*shape_in]`
+
+**Outputs:**
+- `default`: `[*shape_out]`
+
+## Implementation
+
+```
+Source { source: "core", path: "structural/Reshape" }
+```
+
+---
+
+# Slice
+
+Source: https://neuroscript-lang.com/docs/primitives/Structural/slice
+
+# Slice
+
+Slice
+
+Extracts a contiguous slice from a tensor along specified dimensions.
+
+Parameters:
+- dim: Dimension to slice along
+- start: Starting index (inclusive)
+- end: Ending index (exclusive, use -1 for end)
+
+Shape Contract:
+- Input: [*shape_in] tensor to slice
+- Output: [*shape_out] sliced tensor (smaller along dim)
+
+Notes:
+- No learnable parameters (pure structural operation)
+- Supports negative indexing (Python-style)
+- end=-1 means slice to the end
+- Commonly used to extract specific positions or ranges
+- Memory efficient (view operation when possible)
+
+## Signature
+
+```neuroscript
+neuron Slice(dim, start, end)
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*shape_in]`
+
+**Outputs:**
+- `default`: `[*shape_out]`
+
+## Implementation
+
+```
+Source { source: "core", path: "structural/Slice" }
+```
+
+---
+
+# Split
+
+Source: https://neuroscript-lang.com/docs/primitives/Structural/split
+
+# Split
+
+Split
+
+Splits a tensor into multiple chunks along a specified dimension.
+
+Parameters:
+- num_splits: Number of equal-sized chunks to create
+- dim: Dimension along which to split (default: -1)
+
+Shape Contract:
+- Input: [*shape] tensor to split
+- Output a: [*shape_a] first chunk
+- Output b: [*shape_b] second chunk (if num_splits >= 2)
+
+Notes:
+- Input size along dim must be divisible by num_splits
+- Returns tuple of tensors
+- No learnable parameters (pure structural operation)
+- Inverse of Concat
+- Commonly used to split heads in attention or features
+
+## Signature
+
+```neuroscript
+neuron Split(num_splits, dim=BinOp { op: Sub, left: Int(0), right: Int(1) })
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*shape]`
+
+**Outputs:**
+- `a`: `[*shape_a]`
+- `b`: `[*shape_b]`
+
+## Implementation
+
+```
+Source { source: "core", path: "structural/Split" }
+```
+
+---
+
+# Transpose
+
+Source: https://neuroscript-lang.com/docs/primitives/Structural/transpose
+
+# Transpose
+
+Transpose
+
+Permutes the dimensions of a tensor according to the specified ordering.
+Essential for reshaping data between different layer expectations.
+
+Parameters:
+- dims: Tuple/list specifying the new dimension order (e.g., (0, 2, 1))
+
+Shape Contract:
+- Input: [*shape_in] tensor with dimensions to permute
+- Output: [*shape_out] tensor with reordered dimensions
+
+Notes:
+- No learnable parameters (pure structural operation)
+- Common use: converting between channel-first and channel-last formats
+- For attention: transposing keys for batched matrix multiplication
+- Example: [batch, seq, dim] with dims=(0, 2, 1) gives [batch, dim, seq]
+- All dimensions must be accounted for in the permutation
+
+## Signature
+
+```neuroscript
+neuron Transpose(dims)
+```
+
+## Ports
+
+**Inputs:**
+- `default`: `[*shape_in]`
+
+**Outputs:**
+- `default`: `[*shape_out]`
+
+## Implementation
+
+```
+Source { source: "core", path: "structural/Transpose" }
+```
+
+---
+
+# Primitives
+
+Source: https://neuroscript-lang.com/docs/primitives
+
+# Primitives
+
+Primitives are the fundamental building blocks of NeuroScript. They wrap PyTorch operations and provide the foundation for building complex neural architectures.
+
+## Categories
+
+### Basics
+
+- [Linear](./Basics/linear) - Fully-connected linear transformation
+
+### Activations
+
+- [ReLU](./Activations/relu) - Rectified Linear Unit
+- [GELU](./Activations/gelu) - Gaussian Error Linear Unit
+- [SiLU](./Activations/silu) - Sigmoid Linear Unit (Swish)
+- [Sigmoid](./Activations/sigmoid) - Sigmoid activation
+- [Tanh](./Activations/tanh) - Hyperbolic tangent activation
+- [ELU](./Activations/elu) - Exponential Linear Unit
+- [Mish](./Activations/mish) - Mish activation
+- [PReLU](./Activations/prelu) - Parametric ReLU with learnable slope
+- [Softmax](./Activations/softmax) - Softmax normalization
+
+### Attention
+
+- [ScaledDotProductAttention](./Attention/scaleddotproductattention) - Core attention mechanism (Q, K, V)
+- [MultiHeadSelfAttention](./Attention/multiheadselfattention) - Multi-head self-attention
+
+### Normalization
+
+- [LayerNorm](./Normalization/layernorm) - Layer normalization
+- [RMSNorm](./Normalization/rmsnorm) - Root Mean Square normalization
+- [BatchNorm](./Normalization/batchnorm) - Batch normalization
+- [GroupNorm](./Normalization/groupnorm) - Group normalization
+- [InstanceNorm](./Normalization/instancenorm) - Instance normalization
+
+### Embeddings
+
+- [Embedding](./Embeddings/embedding) - Token embedding (index → dense vector)
+- [PositionalEncoding](./Embeddings/positionalencoding) - Fixed sinusoidal positional encoding
+- [LearnedPositionalEmbedding](./Embeddings/learnedpositionalembedding) - Learnable positional embeddings
+- [RotaryEmbedding](./Embeddings/rotaryembedding) - Rotary position embeddings (RoPE)
+
+### Convolutions
+
+- [Conv1d](./Convolutions/conv1d) - 1D convolution (sequences, audio)
+- [Conv2d](./Convolutions/conv2d) - 2D convolution (images)
+- [Conv3d](./Convolutions/conv3d) - 3D convolution (volumetric data, video)
+- [DepthwiseConv](./Convolutions/depthwiseconv) - Depthwise separable convolution
+- [SeparableConv](./Convolutions/separableconv) - Depthwise + pointwise convolution
+- [TransposedConv](./Convolutions/transposedconv) - Transposed (deconvolutional) layer
+
+### Pooling
+
+- [MaxPool](./Pooling/maxpool) - 2D max pooling
+- [AvgPool](./Pooling/avgpool) - 2D average pooling
+- [GlobalAvgPool](./Pooling/globalavgpool) - Global average pooling
+- [GlobalMaxPool](./Pooling/globalmaxpool) - Global max pooling
+- [AdaptiveAvgPool](./Pooling/adaptiveavgpool) - Adaptive average pooling
+- [AdaptiveMaxPool](./Pooling/adaptivemaxpool) - Adaptive max pooling
+
+### Regularization
+
+- [Dropout](./Regularization/dropout) - Random element dropout
+- [DropConnect](./Regularization/dropconnect) - Random connection dropout
+- [DropPath](./Regularization/droppath) - Stochastic depth (path dropout)
+
+### Operations
+
+- [MatMul](./Operations/matmul) - Batched matrix multiplication
+- [Bias](./Operations/bias) - Learnable bias addition
+- [Scale](./Operations/scale) - Element-wise scaling
+- [Identity](./Operations/identity) - Pass-through (no-op)
+- [Einsum](./Operations/einsum) - Einstein summation
+
+### Structural
+
+- [Fork](./Structural/fork) - Duplicate input to two outputs
+- [Fork3](./Structural/fork3) - Duplicate input to three outputs
+- [Concat](./Structural/concat) - Concatenate tensors along a dimension
+- [Add](./Structural/add) - Element-wise addition
+- [Multiply](./Structural/multiply) - Element-wise multiplication
+- [Flatten](./Structural/flatten) - Flatten to 2D
+- [Reshape](./Structural/reshape) - Reshape tensor dimensions
+- [Transpose](./Structural/transpose) - Permute tensor dimensions
+- [Slice](./Structural/slice) - Extract a portion of a tensor
+- [Split](./Structural/split) - Split tensor into multiple pieces
+- [Pad](./Structural/pad) - Pad tensor with zeros
+
+## Usage
+
+All primitives are automatically available in your NeuroScript programs. Simply use them by name:
+
+```neuroscript
+neuron MyModel:
+    graph:
+        in -> Linear(512, 256) -> GELU() -> out
+```
+
+## Shape Contracts
+
+Every primitive has a well-defined shape contract that specifies:
+
+- Input shapes (what tensor dimensions are expected)
+- Output shapes (what dimensions are produced)
+- Parameter constraints (what values are valid)
+
+The NeuroScript compiler validates all shape contracts at compile time, catching dimensional errors before code generation.
+
+---
+
+# Standard Library
+
+Source: https://neuroscript-lang.com/docs/stdlib
+
+# Standard Library
+
+The NeuroScript standard library provides high-level, composable neural network components built from primitives. These neurons implement common architectural patterns and can be easily combined to create complex models.
+
+## Categories
+
+### Feed-Forward Networks
+- FFN - Feed-forward network with configurable layers
+- ParallelFFN - Parallel feed-forward processing
+
+### Attention Mechanisms
+- MultiHeadAttention - Multi-head self-attention
+- ScaledDotProductAttention - Core attention computation
+
+### Residual Connections
+- Residual - Skip connection wrapper
+- ResidualAdd - Addition-based residual
+- ResidualConcat - Concatenation-based residual
+
+### Transformer Components
+- TransformerBlock - Complete transformer layer
+- TransformerStack - Multi-layer transformer
+- SequentialTransformer - Sequentially stacked transformer blocks
+
+### Meta Neurons
+- Fork - Split data into multiple paths
+- Identity - Pass-through operation
+- Freeze - Frozen (non-trainable) wrapper
+
+## Using Standard Library Neurons
+
+Import and use stdlib neurons just like primitives:
+
+```neuroscript
+use stdlib,attention/MultiHeadAttention
+
+neuron MyTransformer(dim, heads):
+    graph:
+        in ->
+            MultiHeadAttention(dim, heads)
+            FFN(dim, dim * 4)
+            out
+```
+
+## Composition Patterns
+
+Standard library neurons are designed to compose naturally:
+
+```neuroscript
+neuron GPTBlock(dim, heads):
+    in: [*batch, seq, dim]
+    out: [*batch, seq, dim]
+    graph:
+        in ->
+            Residual(
+                LayerNorm(dim)
+                MultiHeadAttention(dim, heads)
+            )
+            Residual(
+                LayerNorm(dim)
+                FFN(dim, dim * 4)
+            )
+            out
+```
+
+## Design Philosophy
+
+- **Reusable**: Each component is self-contained and composable
+- **Type-safe**: All shape contracts are validated at compile time
+- **Flexible**: Parameters allow customization while maintaining correctness
+- **Documented**: Every neuron includes comprehensive documentation
+
+---
+
+# Conditionals
+
+Source: https://neuroscript-lang.com/docs/tutorials/conditionals
+
+import InteractiveExample from '@site/src/components/InteractiveExample';
+
+# Conditionals (if / elif / else)
+
+NeuroScript's `if`/`elif`/`else` expressions let you choose between pipelines based on neuron **parameters** — values known at compile time like flags, counts, or modes. This complements [match expressions](./match-guards), which branch on tensor **shapes** at runtime.
+
+## When to Use Each
+
+| Construct | Branches on | Known at | Use for |
+|-----------|------------|----------|---------|
+| `if`/`elif`/`else` | Parameter values | Compile time | Feature flags, mode selection, depth guards |
+| `match` with guards | Tensor shapes | Runtime | Adaptive processing based on input dimensions |
+
+## Basic Syntax
+
+The simplest form is an inline `if`/`else`:
+
+```neuroscript
+if condition: pipeline else: pipeline
+```
+
+Or as a multi-line block inside a pipeline:
+
+```neuroscript
+in ->
+    if condition: NeuronA()
+    else: NeuronB()
+    out
+```
+
+## Inline Conditionals
+
+Use inline `if`/`else` when each branch is a short pipeline:
+
+<InteractiveExample
+  title="Optional Pooling"
+  description="A flag parameter controls whether pooling is applied"
+  initialCode={`neuron ConvBlock(in_ch, out_ch, has_pool=true):
+    in: [batch, in_ch, h, w]
+    out: [batch, out_ch, h, w]
+    context:
+        conv = Conv2d(in_ch, out_ch, 3, padding=1)
+        bn = BatchNorm(out_ch)
+        act = ReLU()
+    graph:
+        in -> conv -> bn -> act
+        act -> if has_pool: MaxPool(2, stride=2) -> out else: Identity() -> out`}
+/>
+
+Here `has_pool` is a parameter with a default value of `true`. The compiler statically resolves which branch to include.
+
+## Multi-Line Conditionals
+
+When branches contain multi-step pipelines, use the indented block form:
+
+<InteractiveExample
+  title="Multi-Line Conditional"
+  description="Indented if/else with multi-step branches that feed into the next pipeline step"
+  initialCode={`neuron ConvBlock(in_ch, out_ch, has_pool=true):
+    in: [batch, in_ch, h, w]
+    out: [batch, out_ch, h, w]
+    context:
+        conv = Conv2d(in_ch, out_ch, 3, padding=1)
+        bn = BatchNorm(out_ch)
+        act = ReLU()
+        @lazy pool = MaxPool(2, stride=2)
+    graph:
+        in ->
+            conv
+            bn
+            act
+            if has_pool: pool
+            else: Identity()
+            out`}
+/>
+
+Both branches flow into `out` — the conditional sits inline within the pipeline, and the next step after the `if`/`else` block receives whichever branch was selected.
+
+## Using elif
+
+For multi-way branching, add `elif` arms:
+
+```neuroscript
+neuron FlexibleNorm(dim, mode=1):
+    in: [*, dim]
+    out: [*, dim]
+    graph:
+        in ->
+            if mode == 0: Identity()
+            elif mode == 1: LayerNorm(dim)
+            elif mode == 2: BatchNorm(dim)
+            else: RMSNorm(dim)
+            out
+```
+
+Each condition is checked in order. The first truthy condition wins. The `else` arm is the fallback.
+
+## Conditionals with Context Bindings
+
+When a conditional branch references a neuron that should only be instantiated if the condition is true, use `@lazy`:
+
+<InteractiveExample
+  title="Lazy Conditional"
+  description="@lazy ensures the pool module is only instantiated when has_pool is true"
+  initialCode={`neuron ConvBlock(in_ch, out_ch, has_pool=true):
+    in: [batch, in_ch, h, w]
+    out: [batch, out_ch, h, w]
+    context:
+        conv = Conv2d(in_ch, out_ch, 3, padding=1)
+        bn = BatchNorm(out_ch)
+        act = ReLU()
+        @lazy pool = MaxPool(2, stride=2)
+    graph:
+        in -> conv -> bn -> act
+        act ->
+            if has_pool: pool
+            else: Identity()
+            out`}
+/>
+
+Without `@lazy`, the pool module would be instantiated in `__init__` even when `has_pool` is `false`. The `@lazy` annotation defers instantiation until the binding is actually used.
+
+## Composing Conditional Neurons
+
+Conditionals compose naturally — callers control the flag:
+
+```neuroscript
+neuron CNN(in_channels, num_classes):
+    in: [batch, in_channels, h, w]
+    out: [batch, num_classes]
+    context:
+        conv1 = ConvBlock(in_channels, 32)             # has_pool defaults to true
+        conv2 = ConvBlock(32, 64)                       # has_pool defaults to true
+        conv3 = ConvBlock(64, 128, has_pool=false)      # no pooling on last block
+    graph:
+        in -> conv1 -> conv2 -> conv3 -> GlobalAvgPool() -> Flatten(1) -> Linear(128, num_classes) -> out
+```
+
+## Comparison with Match Expressions
+
+Both constructs route data, but they serve different purposes:
+
+```neuroscript
+# if/elif/else: parameter-based (compile-time)
+in ->
+    if use_attention: MultiHeadSelfAttention(dim, heads)
+    else: Linear(dim, dim)
+    out
+
+# match: shape-based (runtime)
+in -> match: ->
+    [*, d] where d > 512: Linear(d, 512) -> out
+    [*, d]: Linear(d, 256) -> Linear(256, 512) -> out
+```
+
+Use `if`/`elif`/`else` when the decision depends on a parameter. Use `match` when it depends on the actual tensor shape flowing through the graph.
+
+## Try It Yourself
+
+Experiment with conditionals:
+- Change the `has_pool` default value and see how the output changes
+- Add an `elif` arm for a third option
+- Combine `if`/`else` with `@lazy` bindings for conditional module instantiation
+- Click "Show Analysis" to see which branch the compiler selects
+
+---
+
+# Fork and Join
+
+Source: https://neuroscript-lang.com/docs/tutorials/fork-join
+
+import InteractiveExample from '@site/src/components/InteractiveExample';
+
+# Fork and Join Patterns
+
+NeuroScript supports splitting data into multiple branches and merging them back together. This enables powerful patterns like residual connections, multi-path processing, and parallel computations.
+
+## The Fork Neuron
+
+`Fork()` duplicates its input into multiple identical copies. Combined with **tuple unpacking**, you can name each branch:
+
+```neuroscript
+in -> Fork() -> (branch_a, branch_b)
+```
+
+This creates two references (`branch_a` and `branch_b`) that both point to the same data. You can then process each branch independently.
+
+## Basic Fork Example
+
+<InteractiveExample
+  title="Simple Fork"
+  description="Fork creates two identical copies that can be processed separately"
+  initialCode={`neuron SimpleFork(dim):
+    in: [*, dim]
+    out: [*, dim]
+    graph:
+        in -> Fork() -> (left, right)
+        left -> Linear(dim, dim) -> processed
+        (processed, right) -> Add() -> out`}
+/>
+
+In this example:
+1. `Fork()` duplicates the input
+2. `left` goes through a Linear layer
+3. `right` is unchanged (identity path)
+4. `Add()` combines them element-wise
+
+## Residual Connection Pattern
+
+The most common fork/join pattern is the **residual connection** (skip connection):
+
+<InteractiveExample
+  title="Residual Block"
+  description="The classic ResNet pattern: process main path, add skip connection"
+  initialCode={`neuron ResidualBlock(dim):
+    in: [*, dim]
+    out: [*, dim]
+    graph:
+        in -> Fork() -> (main, skip)
+        main ->
+            LayerNorm(dim)
+            Linear(dim, dim * 4)
+            GELU()
+            Linear(dim * 4, dim)
+            processed
+        (processed, skip) -> Add() -> out`}
+/>
+
+Key points:
+- `main` path transforms the data
+- `skip` path preserves the original input
+- `Add()` merges them, enabling gradient flow
+- Both paths must have **matching shapes** at the merge point
+
+## Three-Way Fork
+
+Use `Fork3()` to create three branches:
+
+<InteractiveExample
+  title="Three-Way Processing"
+  description="Fork3 creates three branches for parallel processing"
+  initialCode={`neuron ThreeWayBlock(dim):
+    in: [*, dim]
+    out: [*, dim]
+    graph:
+        in -> Fork3() -> (a, b, c)
+        a -> Linear(dim, dim) -> pa
+        b -> Linear(dim, dim) -> pb
+        c -> Identity() -> pc
+        (pa, pb) -> Add() -> ab
+        (ab, pc) -> Add() -> out`}
+/>
+
+## Shape Constraints at Merge Points
+
+When merging branches with `Add()`, `Multiply()`, or similar operations, all inputs must have the **same shape**:
+
+```neuroscript
+# This works - both branches have shape [*, dim]
+(processed, skip) -> Add() -> out
+
+# This would fail - shape mismatch
+main -> Linear(dim, dim * 2) -> processed  # [*, dim * 2]
+(processed, skip) -> Add() -> out           # skip is [*, dim] - mismatch!
+```
+
+The compiler validates shape compatibility at merge points during validation.
+
+## Concat Instead of Add
+
+If you want to combine branches with different dimensions, use `Concat()`:
+
+<InteractiveExample
+  title="Concatenation"
+  description="Concat joins tensors along the last dimension"
+  initialCode={`neuron ConcatBranches(dim):
+    in: [*, dim]
+    out: [*, dim * 2]
+    graph:
+        in -> Fork() -> (a, b)
+        a -> Linear(dim, dim) -> pa
+        b -> Linear(dim, dim) -> pb
+        (pa, pb) -> Concat() -> out`}
+/>
+
+## Try It Yourself
+
+Experiment with these patterns:
+- Add more processing to the main branch
+- Try different merge operations (`Add`, `Multiply`, `Concat`)
+- Create deeper residual chains
+- Click "Show Analysis" to trace how shapes flow through branches
+
+---
+
+# Higher-Order Neurons
+
+Source: https://neuroscript-lang.com/docs/tutorials/higher-order-neurons
+
+import InteractiveExample from '@site/src/components/InteractiveExample';
+
+# Higher-Order Neurons
+
+NeuroScript supports **higher-order neurons** — neurons that accept other neuron types as parameters. This lets you build generic architectures that work with any block type, similar to higher-order functions in programming.
+
+## The `: Neuron` Type Annotation
+
+Mark a parameter as a neuron type by adding `: Neuron`:
+
+```neuroscript
+neuron Stack(block: Neuron, d_model, count=6):
+```
+
+The `block` parameter doesn't hold a value — it holds a **neuron constructor**. When someone instantiates `Stack`, they pass a neuron name (like `TransformerBlock`), and `block` can be used anywhere a neuron name would appear.
+
+## Basic Higher-Order Neuron
+
+<InteractiveExample
+  title="Generic Stack"
+  description="A reusable stack that works with any block type"
+  initialCode={`neuron Stack(block: Neuron, d_model, num_heads, d_ff, count=6):
+    in: [*, seq, d_model]
+    out: [*, seq, d_model]
+    context:
+        blocks = unroll(count):
+            layer = block(d_model, num_heads, d_ff)
+    graph:
+        in ->
+            blocks
+            out`}
+/>
+
+This neuron:
+- Takes `block: Neuron` as its first parameter
+- Uses `block(d_model, num_heads, d_ff)` in context bindings just like any neuron call
+- Can be instantiated with different block types: `Stack(TransformerBlock, 512, 8, 2048)`
+
+## Contract Dispatch with `match(param):`
+
+Sometimes you need different wiring strategies depending on what block is passed. The `match(param):` syntax inspects a neuron parameter's port shapes at compile time:
+
+<InteractiveExample
+  title="Shape-Aware Stack"
+  description="Selects wiring strategy based on the block's port signatures"
+  initialCode={`neuron SmartStack(block: Neuron, d_model, count=6):
+    in: [*, seq, d_model]
+    out: [*, seq, d_model]
+    context:
+        blocks = unroll(count):
+            layer = block(d_model)
+    graph:
+        in ->
+            match(block):
+                in [*, seq, d_model] -> out [*, seq, d_model]:
+                    blocks
+                    out
+                in [*, d_model] -> out [*, d_model]:
+                    blocks
+                    out`}
+/>
+
+Each arm specifies an **input/output port contract**:
+- `in [*, seq, d_model] -> out [*, seq, d_model]` matches blocks that process sequences
+- `in [*, d_model] -> out [*, d_model]` matches blocks that process individual vectors
+
+The compiler resolves this at compile time: when `SmartStack` is instantiated with a concrete block, it checks the block's declared ports against each arm and selects the first match.
+
+## How It Works
+
+1. **Parameter declaration**: `block: Neuron` tells the compiler this parameter receives a neuron type
+2. **Usage in context**: `block(args...)` instantiates the neuron, just like calling any other neuron
+3. **Contract dispatch** (optional): `match(block):` lets you inspect the block's port shapes
+4. **Resolution**: When the higher-order neuron is instantiated with a concrete block, the compiler resolves all `match(block):` expressions at compile time
+
+## Combining with Unroll
+
+Higher-order neurons compose naturally with named unrolls:
+
+```neuroscript
+neuron RepeatBlock(block: Neuron, d_model, count=4):
+    in: [*, seq, d_model]
+    out: [*, seq, d_model]
+    context:
+        layers = unroll(count):
+            layer = block(d_model)
+    graph:
+        in ->
+            layers
+            out
+```
+
+The `block` parameter is called inside the unroll to create `count` independent instances, each with its own weights. The `layers` aggregate then threads data through all of them sequentially.
+
+## Key Rules
+
+- Parameters with `: Neuron` annotation hold neuron constructors, not tensor values
+- A neuron-typed parameter can be used anywhere a neuron name appears (in context bindings, in graph calls)
+- `match(param):` arms use port contract patterns (`in [shape] -> out [shape]`), not tensor shape patterns
+- Contract dispatch is resolved at **compile time** — the block's ports must match at least one arm
+- All standard neuron features (unroll, @static, pipeline chaining) work with neuron-typed parameters
+
+## Try It Yourself
+
+Experiment with higher-order neurons:
+- Change the block parameter to different neuron types
+- Add contract dispatch to handle blocks with different port shapes
+- Combine with `@static` unroll for weight-shared stacks
+- Click "Show Analysis" to see how the compiler resolves the contracts
+
+---
+
+# Match and Guards
+
+Source: https://neuroscript-lang.com/docs/tutorials/match-guards
+
+import InteractiveExample from '@site/src/components/InteractiveExample';
+
+# Match Expressions and Guards
+
+NeuroScript's `match` expressions let you route tensors to different processing pipelines based on their shape. Combined with **guards** (where clauses), you can create adaptive networks that handle varying input sizes optimally.
+
+## Basic Match Syntax
+
+```neuroscript
+in -> match: ->
+    [pattern]: pipeline -> out
+    [pattern]: different_pipeline -> out
+```
+
+Each arm has:
+- A **pattern** that matches tensor shapes
+- An optional **guard** (`where` clause) with a condition
+- A **pipeline** to execute if the pattern matches
+
+## Dimension Binding
+
+Patterns can capture dimensions into variables:
+
+```neuroscript
+[*, d]           # Captures last dimension as 'd'
+[*, seq, dim]    # Captures last two dimensions
+[*batch, d]      # Captures batch dimensions as variadic
+```
+
+Captured dimensions can be used in:
+- Guard conditions (`where d > 512`)
+- Neuron arguments (`Linear(d, 256)`)
+
+## Adaptive Projection Example
+
+<InteractiveExample
+  title="Adaptive Projection"
+  description="Different processing paths based on input dimension size"
+  initialCode={`neuron AdaptiveProjection():
+    in: [*, d]
+    out: [*, 512]
+    graph:
+        in -> match: ->
+            [*, d] where d > 512: Linear(d, 512) -> out
+            [*, d] where d <= 512: Linear(d, 256) -> Linear(256, 512) -> out`}
+/>
+
+This neuron:
+- For large inputs (`d > 512`): Single projection to 512
+- For small inputs (`d <= 512`): Two-stage expansion through 256
+
+Click "Show Analysis" to see the match arms and their patterns.
+
+## Multi-Tier Compression
+
+<InteractiveExample
+  title="Multi-Tier Compression"
+  description="Four different compression strategies based on input size"
+  initialCode={`neuron AdaptiveCompressor():
+    in: [*, d]
+    out: [*, 128]
+    graph:
+        in -> match: ->
+            [*, d] where d > 1024: Linear(d, 512) -> GELU() -> Linear(512, 128) -> out
+            [*, d] where d > 512: Linear(d, 256) -> GELU() -> Linear(256, 128) -> out
+            [*, d] where d > 128: Linear(d, 128) -> out
+            [*, d]: Identity() -> out`}
+/>
+
+This creates four tiers:
+1. Very large inputs (d &gt; 1024): Two-stage aggressive compression
+2. Large inputs (d &gt; 512): Two-stage moderate compression
+3. Medium inputs (d &gt; 128): Single-stage compression
+4. Small inputs (d &lt;= 128): Pass through unchanged
+
+## Pattern Ordering
+
+Match arms are checked **in order**. More specific patterns should come before general ones:
+
+```neuroscript
+# Correct ordering: specific to general
+[*, 512]: Identity() -> out           # Exact match first
+[*, d] where d > 512: compress(d)     # Guarded pattern
+[*, d]: expand(d)                     # Catch-all last
+
+# Wrong ordering: catch-all shadows others
+[*, d]: expand(d)                     # This catches everything!
+[*, 512]: Identity() -> out           # Never reached
+```
+
+The compiler will warn you about **unreachable arms**.
+
+## Sequence-Aware Processing
+
+Match on multiple dimensions for sequence models:
+
+<InteractiveExample
+  title="Sequence-Aware Encoder"
+  description="Different processing based on sequence length and dimension"
+  initialCode={`neuron FlexibleEncoder():
+    in: [*, seq, d]
+    out: [*, seq, 512]
+    graph:
+        in -> match: ->
+            [*, seq, d] where d == 512: Identity() -> out
+            [*, seq, d] where d < 512: Linear(d, 512) -> out
+            [*, seq, d] where d > 512: Linear(d, 512) -> out`}
+/>
+
+## Using Captured Dimensions in Pipelines
+
+Captured dimensions can be used as arguments to neurons in the pipeline:
+
+<InteractiveExample
+  title="Dynamic Layer Sizing"
+  description="Captured dimension 'd' is used in Linear layer arguments"
+  initialCode={`neuron DynamicProjection():
+    in: [*, d]
+    out: [*, 512]
+    graph:
+        in -> match: ->
+            [*, d] where d > 512:
+                Linear(d, 512)
+                out
+            [*, d]:
+                Linear(d, d * 2)
+                GELU()
+                Linear(d * 2, 512)
+                out`}
+/>
+
+Notice how `d` appears in `Linear(d, 512)` and `Linear(d, d * 2)`. The actual values are determined at runtime based on the input shape.
+
+## Guards with Multiple Conditions
+
+Guards can use `and`/`or` for complex conditions:
+
+```neuroscript
+[*, d] where d > 256 and d < 1024: medium_path()
+[*, seq, d] where seq > 100 or d > 512: large_path()
+```
+
+## Try It Yourself
+
+Experiment with match expressions:
+- Add new pattern arms with different thresholds
+- Try capturing multiple dimensions
+- Use captured dimensions in different ways
+- Watch for "unreachable arm" warnings when ordering is wrong
+- Click "Show Analysis" to see which patterns are reachable
+
+---
+
+# Shape Inference
+
+Source: https://neuroscript-lang.com/docs/tutorials/shape-inference
+
+import InteractiveExample from '@site/src/components/InteractiveExample';
+
+# Shape Inference
+
+NeuroScript automatically infers tensor dimensions as data flows through your network. This powerful feature lets you write flexible, reusable neurons without specifying every dimension explicitly.
+
+## Dimension Variables
+
+In NeuroScript, shapes use **dimension variables** like `dim`, `batch`, `seq` that get resolved based on how neurons are connected.
+
+```neuroscript
+neuron MyNeuron(dim):
+    in: [*, dim]        # Input: any batch dimensions + dim
+    out: [*, dim * 4]   # Output: same batch dimensions + dim * 4
+```
+
+When you instantiate this neuron, the compiler infers the actual value of `dim` from the context.
+
+## Basic Example: Linear Projection
+
+This neuron takes input of shape `[*, dim]` and produces output of shape `[*, dim * 4]`:
+
+<InteractiveExample
+  title="Linear Projection"
+  description="The dimension variable 'dim' is used in both input shape and Linear arguments"
+  initialCode={`neuron LinearProjection(dim):
+    in: [*, dim]
+    out: [*, dim * 4]
+    graph:
+        in -> Linear(dim, dim * 4) -> out`}
+/>
+
+Click "Show Analysis" to see the shape contracts. Notice how `dim` appears in:
+- The input shape `[*, dim]`
+- The output shape `[*, dim * 4]`
+- The Linear layer arguments `Linear(dim, dim * 4)`
+
+## Expand and Contract Pattern
+
+A common pattern is to expand dimensions, apply transformations, then contract back:
+
+<InteractiveExample
+  title="Expand-Contract (FFN Pattern)"
+  description="Dimensions expand (dim -> dim*4) then contract back (dim*4 -> dim)"
+  initialCode={`neuron FFN(dim):
+    in: [*, dim]
+    out: [*, dim]
+    graph:
+        in ->
+            Linear(dim, dim * 4)
+            GELU()
+            Linear(dim * 4, dim)
+            out`}
+/>
+
+This is the feed-forward network (FFN) pattern used in Transformers. The intermediate dimension is 4x the input, allowing for richer representations.
+
+## Multiple Dimension Variables
+
+You can use multiple dimension variables for more complex shapes:
+
+<InteractiveExample
+  title="Multi-Head Attention Shape"
+  description="Three dimension variables: batch (*), sequence (seq), and model dimension (dim)"
+  initialCode={`neuron AttentionBlock(dim, heads):
+    in: [*, seq, dim]
+    out: [*, seq, dim]
+    graph:
+        in ->
+            LayerNorm(dim)
+            MultiHeadSelfAttention(dim, heads)
+            out`}
+/>
+
+Here:
+- `*` captures any batch dimensions
+- `seq` is the sequence length
+- `dim` is the model dimension
+- `heads` is a parameter (number of attention heads)
+
+## How Inference Works
+
+When neurons are connected, the compiler:
+
+1. **Matches output shape to input shape** - Dimensions align position-by-position
+2. **Unifies dimension variables** - If output has `dim` and input expects `dim`, they must match
+3. **Evaluates expressions** - Expressions like `dim * 4` are computed when `dim` is known
+4. **Propagates constraints** - Inferred values flow through the entire graph
+
+## Try It Yourself
+
+Experiment with the examples above:
+- Change dimension variable names
+- Modify the expansion factor (try `dim * 2` or `dim * 8`)
+- Add more layers to the pipeline
+- Click "Show Analysis" to see how shapes flow through connections
+
+---
+
+# Unroll
+
+Source: https://neuroscript-lang.com/docs/tutorials/unroll
+
+import InteractiveExample from '@site/src/components/InteractiveExample';
+
+# Unroll
+
+The `unroll` construct expands repeated layers at **compile time**. Instead of writing the same neuron call N times, you write it once and let the compiler generate the repetitions. Each iteration gets its own independent weights by default.
+
+## Why "Unroll"?
+
+The name is intentional — this is not a runtime loop. The compiler literally unrolls the construct into N separate graph nodes before code generation. The count must be a literal integer or a parameter with a default value, never a runtime value.
+
+## Named Unroll Syntax
+
+Declare an unroll block in the `context:` section with a **named aggregate**:
+
+<InteractiveExample
+  title="Transformer Stack"
+  description="N transformer blocks chained sequentially via named unroll"
+  initialCode={`neuron TransformerStack(d_model, num_heads, d_ff, num_layers=6):
+    in: [batch, seq, d_model]
+    out: [batch, seq, d_model]
+    context:
+        blocks = unroll(num_layers):
+            block = TransformerBlock(d_model, num_heads, d_ff)
+    graph:
+        in ->
+            blocks
+            out`}
+/>
+
+Here's what's happening:
+- `blocks = unroll(num_layers):` declares a named aggregate called `blocks`
+- Inside, `block = TransformerBlock(...)` defines the binding for each iteration
+- In the graph, `blocks` references the aggregate — the compiler expands it into a sequential chain where each iteration's output feeds the next iteration's input
+- Each `block` is an independent module with its own weights
+
+## Weight Sharing with @static
+
+To reuse the **same weights** across all iterations (like a Universal Transformer), add `@static` to the binding:
+
+<InteractiveExample
+  title="Weight Sharing"
+  description="@static makes all iterations share one set of weights"
+  initialCode={`neuron UniversalTransformer(d_model, num_heads, d_ff, num_steps=6):
+    in: [batch, seq, d_model]
+    out: [batch, seq, d_model]
+    context:
+        blocks = unroll(num_steps):
+            @static block = TransformerBlock(d_model, num_heads, d_ff)
+    graph:
+        in ->
+            blocks
+            out`}
+/>
+
+`@static` means one instance, reused across all iterations. The generated code creates a single `TransformerBlock` in `__init__` and calls it `num_steps` times in `forward`.
+
+## End-to-End Example: GPT-2
+
+`unroll` composes naturally with other pipeline steps — the aggregate is just another node in the chain:
+
+<InteractiveExample
+  title="GPT-2 Small"
+  description="Full model: embedding → unrolled transformer blocks → head"
+  initialCode={`neuron GPT2Small(vocab_size=50257, d_model=768, num_heads=12, d_ff=3072, num_layers=12):
+    in: [*, seq]
+    out: [*, seq, vocab_size]
+    context:
+        embed = Embedding(vocab_size, d_model)
+        blocks = unroll(num_layers):
+            block = TransformerBlock(d_model, num_heads, d_ff)
+        ln_f = LayerNorm(d_model)
+        head = Linear(d_model, vocab_size)
+    graph:
+        in ->
+            embed
+            blocks
+            ln_f
+            head
+            out`}
+/>
+
+This replaces what would otherwise be 12 hand-written `TransformerBlock` calls. The `blocks` aggregate sits naturally between `embed` and `ln_f` in the pipeline.
+
+## Key Rules
+
+- The count must be a **literal integer or a parameter with a default value** — it must be resolvable at compile time
+- Each iteration gets **independent weights** unless `@static` is used
+- The aggregate name (e.g., `blocks`) references the entire unrolled group as a sequential chain
+- Unroll blocks are declared in `context:` and referenced by name in `graph:`
+
+## Try It Yourself
+
+Experiment with unroll:
+- Change `num_layers` to see how the expanded graph changes
+- Add `@static` to see the difference in generated code
+- Compose the aggregate with other pipeline steps
+- Click "Show Analysis" to see the unrolled structure
+
+---
+
+# Variadic Ports
+
+Source: https://neuroscript-lang.com/docs/tutorials/variadic-ports
+
+import InteractiveExample from '@site/src/components/InteractiveExample';
+
+# Variadic Ports
+
+Standard neurons have a fixed number of input ports. **Variadic ports** let a neuron accept any number of inputs — two, three, ten — through a single declaration. This is essential for operations like concatenation, addition, and other N-ary reductions.
+
+## Declaration Syntax
+
+A variadic input port uses `*` before the port name:
+
+```neuroscript
+neuron Concat(dim):
+    in *inputs: [*shape]
+    out: [*shape_out]
+    impl: core,structural/Concat
+```
+
+The `*inputs` declaration means this neuron accepts a **tuple of any length** as input. Each element of the tuple is validated individually against the port's shape pattern (`[*shape]`).
+
+## Calling Variadic Neurons
+
+Pass a tuple of connections to a variadic neuron:
+
+<InteractiveExample
+  title="Two-Input Concat"
+  description="Two branches concatenated along the last dimension"
+  initialCode={`neuron TwoWayConcat(dim):
+    in: [*, dim]
+    out: [*, dim * 2]
+    graph:
+        in -> (a, b)
+        a -> Linear(dim, dim) -> pa
+        b -> Linear(dim, dim) -> pb
+        (pa, pb) -> Concat(1) -> out`}
+/>
+
+The tuple `(pa, pb)` feeds into `Concat`'s variadic `*inputs` port. Each element is checked against the shape pattern independently.
+
+## Scaling to More Inputs
+
+The same neuron works with any number of inputs — no overloads needed:
+
+<InteractiveExample
+  title="Three-Input Concat"
+  description="Three branches concatenated — same Concat neuron, more inputs"
+  initialCode={`neuron ThreeWayConcat(dim):
+    in: [*, dim]
+    out: [*, dim * 3]
+    graph:
+        in -> (a, b, c)
+        a -> Linear(dim, dim) -> pa
+        b -> Linear(dim, dim) -> pb
+        c -> Linear(dim, dim) -> pc
+        (pa, pb, pc) -> Concat(1) -> out`}
+/>
+
+## Composing Variadic Neurons
+
+A composite neuron can itself declare a variadic port and pass it through:
+
+<InteractiveExample
+  title="Variadic Composite"
+  description="ConcatNorm accepts any number of inputs, concatenates, then normalizes"
+  initialCode={`neuron ConcatNorm(dim):
+    in *inputs: [*shape]
+    out: [*, dim]
+    graph:
+        in -> Concat(1) -> LayerNorm(dim) -> out`}
+/>
+
+When a composite neuron has a variadic port, the incoming tuple is passed as-is to the first connection. Here, `in` carries the full tuple directly into `Concat`.
+
+## Inception-Style Pattern
+
+Variadic ports enable multi-branch architectures where the number of branches is flexible:
+
+<InteractiveExample
+  title="Four-Way Concat"
+  description="Four parallel paths merged via variadic Concat"
+  initialCode={`neuron FourWayConcat(dim):
+    in: [*, dim]
+    out: [*, dim * 4]
+    graph:
+        in -> (a, b, c, d)
+        a -> Linear(dim, dim) -> pa
+        b -> Linear(dim, dim) -> pb
+        c -> Linear(dim, dim) -> pc
+        d -> Linear(dim, dim) -> pd
+        (pa, pb, pc, pd) -> Concat(1) -> out`}
+/>
+
+## Rules and Constraints
+
+- Only **input** ports can be variadic — output ports cannot
+- A neuron with a variadic port must have exactly **one** `in` declaration
+- The variadic port must have an explicit **name** (e.g., `*inputs`, not just `*`)
+- Each tuple element is validated against the port's shape **individually**
+- In composite neurons, `in` carries the full tuple and passes it as-is to the first connection
+
+## Comparison with Fixed Ports
+
+| Feature | Fixed ports | Variadic port |
+|---------|------------|---------------|
+| Declaration | `in left: [*shape]` | `in *inputs: [*shape]` |
+| Input count | Fixed at definition | Any tuple length |
+| Shape check | Per-port | Per-element against same pattern |
+| Use case | Known arity (Add, Fork) | Variable arity (Concat, Sum) |
+
+## Try It Yourself
+
+Experiment with variadic ports:
+- Change the number of branches feeding into Concat
+- Create a composite neuron with a variadic port
+- Try passing different numbers of inputs to the same variadic neuron
+- Click "Show Analysis" to see how shapes flow through variadic connections
