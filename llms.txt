@@ -40,6 +40,7 @@ Neural Architecture Composition Language
 - [LayerNorm](https://neuroscript-lang.com/docs/primitives/Normalization/layernorm)
 - [RMSNorm](https://neuroscript-lang.com/docs/primitives/Normalization/rmsnorm)
 - [Bias](https://neuroscript-lang.com/docs/primitives/Operations/bias)
+- [ConstScale](https://neuroscript-lang.com/docs/primitives/Operations/constScale)
 - [Einsum](https://neuroscript-lang.com/docs/primitives/Operations/einsum)
 - [Identity](https://neuroscript-lang.com/docs/primitives/Operations/identity)
 - [MatMul](https://neuroscript-lang.com/docs/primitives/Operations/matmul)
@@ -66,6 +67,7 @@ Neural Architecture Composition Language
 - [Transpose](https://neuroscript-lang.com/docs/primitives/Structural/transpose)
 - [Standard Library](https://neuroscript-lang.com/docs/stdlib)
 - [Conditionals](https://neuroscript-lang.com/docs/tutorials/conditionals): Route tensors with if/elif/else based on parameters
+- [Einops & Einsum](https://neuroscript-lang.com/docs/tutorials/einops-and-einsum): Shape transforms and tensor contractions — the ideas behind NeuroScript's fat arrow operator and Einsum primitive
 - [Fork and Join](https://neuroscript-lang.com/docs/tutorials/fork-join): Split and merge data flows with tuples
 - [Higher-Order Neurons](https://neuroscript-lang.com/docs/tutorials/higher-order-neurons): Pass neuron types as parameters for generic, reusable architectures
 - [Match and Guards](https://neuroscript-lang.com/docs/tutorials/match-guards): Route tensors based on their shape at runtime
@@ -75,6 +77,6 @@ Neural Architecture Composition Language
 
 ## Metadata
 
-- Generated: 2026-02-20T21:49:52.003Z
+- Generated: 2026-03-03T05:52:47.513Z
 - Base URL: https://neuroscript-lang.com/
-- Total Documents: 68
+- Total Documents: 70
